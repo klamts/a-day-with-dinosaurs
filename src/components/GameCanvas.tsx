@@ -1,31 +1,61 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { GameRoomState, Player, ActiveDinosaur, CaptureParticle } from '../types/game';
-import { drawPrehistoricMap, drawDinosaur, drawPlayer } from '../utils/dinoRenderer';
-import { DINOSAUR_CATALOG } from '../data/dinosaurs';
+import React, { useRef, useEffect, useState } from 'react';
+import { GameRoomState, Player, CaptureParticle, SkillAimState } from '../types/game';
+import {
+  drawPrehistoricMap,
+  drawDinosaur,
+  drawPlayer,
+  drawHomeBases,
+  drawActivePowerUps,
+  drawEarthFissures,
+  drawSecretTunnels,
+  drawTidalWaves,
+  drawTetherRope,
+  drawSkillAimIndicator
+} from '../utils/dinoRenderer';
 import { audioEngine } from '../audio/audioEngine';
 
 interface GameCanvasProps {
   roomState: GameRoomState;
   localPlayerId: string;
   isOnlineMode: boolean;
+  aimingSkill?: SkillAimState | null;
+  onCancelAim?: () => void;
   onSendPlayerInput: (vx: number, vy: number, angle: number, isBoosting: boolean) => void;
   onThrowLasso: (angle?: number) => void;
   onDropLure: () => void;
+  onUseGem1?: () => void;
+  onUseGem2?: () => void;
+  onUseSprint?: () => void;
+  onUsePowerUp?: () => void;
   onLocalP2Input?: (vx: number, vy: number, angle: number, isBoosting: boolean) => void;
   onLocalP2Lasso?: () => void;
   onLocalP2Lure?: () => void;
+  onLocalP2UseGem1?: () => void;
+  onLocalP2UseGem2?: () => void;
+  onLocalP2UseSprint?: () => void;
+  onLocalP2UsePowerUp?: () => void;
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
   roomState,
   localPlayerId,
   isOnlineMode,
+  aimingSkill,
+  onCancelAim,
   onSendPlayerInput,
   onThrowLasso,
   onDropLure,
+  onUseGem1,
+  onUseGem2,
+  onUseSprint,
+  onUsePowerUp,
   onLocalP2Input,
   onLocalP2Lasso,
-  onLocalP2Lure
+  onLocalP2Lure,
+  onLocalP2UseGem1,
+  onLocalP2UseGem2,
+  onLocalP2UseSprint,
+  onLocalP2UsePowerUp
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationFrameId = useRef<number | null>(null);
@@ -45,7 +75,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         e.preventDefault();
         onThrowLasso();
         audioEngine.playLassoThrow();
+      } else if (e.code === 'KeyQ') {
+        e.preventDefault();
+        if (onUseGem1) onUseGem1();
+        else if (onUsePowerUp) onUsePowerUp();
       } else if (e.code === 'KeyE') {
+        e.preventDefault();
+        if (onUseGem2) onUseGem2();
+        else if (onUsePowerUp) onUsePowerUp();
+      } else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        if (onUseSprint) onUseSprint();
+      } else if (e.code === 'KeyF') {
         e.preventDefault();
         onDropLure();
         audioEngine.playLureDrop();
@@ -56,7 +96,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         e.preventDefault();
         onLocalP2Lasso();
         audioEngine.playLassoThrow();
-      } else if (onLocalP2Lure && e.code === 'ShiftRight') {
+      } else if (onLocalP2UseGem1 && (e.code === 'Numpad1' || e.code === 'Digit1')) {
+        e.preventDefault();
+        onLocalP2UseGem1();
+      } else if (onLocalP2UseGem2 && (e.code === 'Numpad2' || e.code === 'Digit2')) {
+        e.preventDefault();
+        onLocalP2UseGem2();
+      } else if (onLocalP2UseSprint && e.code === 'Numpad0') {
+        e.preventDefault();
+        onLocalP2UseSprint();
+      } else if (onLocalP2Lure && (e.code === 'NumpadAdd' || e.code === 'Slash')) {
         e.preventDefault();
         onLocalP2Lure();
         audioEngine.playLureDrop();
@@ -74,7 +123,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [onThrowLasso, onDropLure, onLocalP2Lasso, onLocalP2Lure]);
+  }, [
+    onThrowLasso,
+    onDropLure,
+    onUseGem1,
+    onUseGem2,
+    onUseSprint,
+    onUsePowerUp,
+    onLocalP2Lasso,
+    onLocalP2Lure,
+    onLocalP2UseGem1,
+    onLocalP2UseGem2,
+    onLocalP2UseSprint,
+    onLocalP2UsePowerUp
+  ]);
 
   // Main input calculation loop (60 Hz)
   useEffect(() => {
@@ -140,7 +202,32 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       // 1. Draw Map & Terrain
       drawPrehistoricMap(ctx, width, height, roomState.map, timeTick);
 
-      // 2. Draw Active Lures
+      // 2. Draw Home Bases (Corrals in corners)
+      if (roomState.homeBases) {
+        drawHomeBases(ctx, roomState.homeBases, timeTick);
+      }
+
+      // 3. Draw Earth Fissures
+      if (roomState.earthFissures) {
+        drawEarthFissures(ctx, roomState.earthFissures, timeTick);
+      }
+
+      // 4. Draw Secret Tunnels
+      if (roomState.secretTunnels) {
+        drawSecretTunnels(ctx, roomState.secretTunnels, timeTick);
+      }
+
+      // 4.5. Draw Tidal Waves (Luồng Nước Khổng Lồ)
+      if (roomState.tidalWaves) {
+        drawTidalWaves(ctx, roomState.tidalWaves, timeTick);
+      }
+
+      // 5. Draw Active Power-Ups
+      if (roomState.activePowerUps) {
+        drawActivePowerUps(ctx, roomState.activePowerUps, timeTick);
+      }
+
+      // 6. Draw Active Lures
       roomState.lures?.forEach(lure => {
         ctx.save();
         ctx.fillStyle = 'rgba(234, 179, 8, 0.2)';
@@ -164,12 +251,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.restore();
       });
 
-      // 3. Draw Dinosaurs
+      // 7. Draw Dinosaurs
       roomState.dinos?.forEach(dino => {
         drawDinosaur(ctx, dino, timeTick);
       });
 
-      // 4. Draw Players & Lassos
+      // 8. Draw Tether Ropes (Drag rope between player and captured dino / player)
+      (Object.values(roomState.players) as Player[]).forEach(player => {
+        const isTitan = player.activeBuffs && player.activeBuffs.titanStrengthTimer > 0;
+        if (player.tetheredDinoId) {
+          const targetDino = roomState.dinos?.find(d => d.instanceId === player.tetheredDinoId);
+          if (targetDino) {
+            drawTetherRope(ctx, player.x, player.y, targetDino.x, targetDino.y, player.color, isTitan);
+          }
+        }
+        if (player.tetheredPlayerId) {
+          const targetOpponent = roomState.players[player.tetheredPlayerId];
+          if (targetOpponent) {
+            drawTetherRope(ctx, player.x, player.y, targetOpponent.x, targetOpponent.y, '#ef4444', true);
+          }
+        }
+      });
+
+      // 9. Draw Players & Lassos
       (Object.values(roomState.players) as Player[]).forEach(player => {
         const isLocal = player.id === localPlayerId;
         drawPlayer(ctx, player, timeTick, isLocal);

@@ -43,12 +43,133 @@ interface ServerDino {
   angle: number;
   size: number;
   state: string;
+  tetheredByPlayerId?: string | null;
   captureProgress: number;
   capturingPlayerIds: string[];
   health?: number;
   maxHealth?: number;
   animationTick: number;
   spawnTime: number;
+}
+
+type PowerUpType =
+  | 'net_trap'
+  | 'speed_boost'
+  | 'titan_strength'
+  | 'secret_tunnel'
+  | 'dino_call'
+  | 'earth_fissure'
+  | 'stun_shockwave'
+  | 'tornado_gust'
+  | 'tidal_wave';
+
+interface ServerTidalWave {
+  id: string;
+  ownerId: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  angle: number;
+  speed: number;
+  width: number;
+  length: number;
+  life: number;
+  maxLife: number;
+}
+
+/** Impassable Earth Fissure barrier collision resolver on server */
+function resolveFissureBarrier(
+  oldX: number,
+  oldY: number,
+  targetX: number,
+  targetY: number,
+  radius: number,
+  fissures: ServerEarthFissure[]
+): { x: number; y: number } {
+  if (!fissures || fissures.length === 0) return { x: targetX, y: targetY };
+
+  let currX = targetX;
+  let currY = targetY;
+
+  for (const fis of fissures) {
+    const x1 = fis.x1;
+    const y1 = fis.y1;
+    const x2 = fis.x2;
+    const y2 = fis.y2;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lineLen2 = dx * dx + dy * dy;
+    if (lineLen2 === 0) continue;
+
+    // 1. Check if movement vector crosses the fissure line segment
+    const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
+      return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+    };
+    const crosses = ccw(oldX, oldY, x1, y1, x2, y2) !== ccw(currX, currY, x1, y1, x2, y2) &&
+                    ccw(oldX, oldY, currX, currY, x1, y1) !== ccw(oldX, oldY, currX, currY, x2, y2);
+    if (crosses) {
+      return { x: oldX, y: oldY };
+    }
+
+    // 2. Check distance from target position to the fissure segment
+    let t = ((currX - x1) * dx + (currY - y1) * dy) / lineLen2;
+    t = Math.max(0, Math.min(1, t));
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    const dist = Math.hypot(currX - projX, currY - projY);
+    const minRequiredDist = radius + 14; // Impassable barrier wall thickness
+
+    if (dist < minRequiredDist) {
+      if (dist < 0.001) {
+        return { x: oldX, y: oldY };
+      }
+      const pushX = (currX - projX) / dist;
+      const pushY = (currY - projY) / dist;
+      currX = projX + pushX * minRequiredDist;
+      currY = projY + pushY * minRequiredDist;
+    }
+  }
+
+  return { x: currX, y: currY };
+}
+
+interface ServerPowerUp {
+  id: string;
+  type: PowerUpType;
+  x: number;
+  y: number;
+  spawnTime: number;
+  duration: number;
+}
+
+interface ServerEarthFissure {
+  id: string;
+  ownerId: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  duration: number;
+}
+
+interface ServerSecretTunnel {
+  id: string;
+  ownerId: string;
+  x: number;
+  y: number;
+  homeX: number;
+  homeY: number;
+  duration: number;
+}
+
+interface ServerHomeBase {
+  slotNumber: 1 | 2 | 3 | 4;
+  x: number;
+  y: number;
+  radius: number;
+  color: string;
+  label: string;
 }
 
 interface ServerPlayer {
@@ -71,13 +192,34 @@ interface ServerPlayer {
   lassoLength: number;
   lassoMaxLength: number;
   lassoAngle: number;
-  lassoState: 'ready' | 'extending' | 'returning' | 'hooked';
+  lassoState: 'ready' | 'extending' | 'returning' | 'hooked' | 'tethering';
   lassoTargetDinoId: string | null;
+  tetheredDinoId: string | null;
+  tetheredPlayerId: string | null;
   speedMultiplier: number;
   boostCooldown: number;
   lureCount: number;
   isStunned: boolean;
   stunTimer: number;
+  isNetTrapped: boolean;
+  netTrapTimer: number;
+  heldPowerUp: PowerUpType | null;
+  equippedGems: [PowerUpType, PowerUpType];
+  gemCooldowns: {
+    gem1: number;
+    gem2: number;
+    sprint: number;
+  };
+  gemMaxCooldowns: {
+    gem1: number;
+    gem2: number;
+    sprint: number;
+  };
+  activeBuffs: {
+    speedTimer: number;
+    titanStrengthTimer: number;
+    dinoCallTimer: number;
+  };
   isReady: boolean;
   isHost: boolean;
   slotNumber: 1 | 2 | 3 | 4;
@@ -99,6 +241,11 @@ interface Room {
   dinos: ServerDino[];
   players: Record<string, ServerPlayer>;
   lures: Array<{ id: string; x: number; y: number; ownerId: string; duration: number; radius: number }>;
+  activePowerUps: ServerPowerUp[];
+  earthFissures: ServerEarthFissure[];
+  secretTunnels: ServerSecretTunnel[];
+  tidalWaves: ServerTidalWave[];
+  homeBases: ServerHomeBase[];
   activeEvents: string[];
   recentCaptures: Array<{
     playerName: string;
@@ -189,6 +336,18 @@ function broadcastRoom(room: Room, message: unknown) {
   });
 }
 
+const GEM_INFO_SERVER: Record<PowerUpType, { cooldownTicks: number; unlockScore: number }> = {
+  tidal_wave: { cooldownTicks: 16 * 30, unlockScore: 20 },
+  net_trap: { cooldownTicks: 14 * 30, unlockScore: 0 },
+  titan_strength: { cooldownTicks: 20 * 30, unlockScore: 30 },
+  secret_tunnel: { cooldownTicks: 22 * 30, unlockScore: 35 },
+  dino_call: { cooldownTicks: 15 * 30, unlockScore: 10 },
+  earth_fissure: { cooldownTicks: 15 * 30, unlockScore: 15 },
+  stun_shockwave: { cooldownTicks: 16 * 30, unlockScore: 15 },
+  tornado_gust: { cooldownTicks: 12 * 30, unlockScore: 0 },
+  speed_boost: { cooldownTicks: 8 * 30, unlockScore: 0 }
+};
+
 function getSanitizedRoomState(room: Room) {
   const sanitizedPlayers: Record<string, Omit<ServerPlayer, 'ws'>> = {};
   for (const [id, p] of Object.entries(room.players)) {
@@ -209,13 +368,62 @@ function getSanitizedRoomState(room: Room) {
     dinos: room.dinos,
     players: sanitizedPlayers,
     lures: room.lures,
+    activePowerUps: room.activePowerUps || [],
+    earthFissures: room.earthFissures || [],
+    secretTunnels: room.secretTunnels || [],
+    tidalWaves: room.tidalWaves || [],
+    homeBases: room.homeBases || [],
     activeEvents: room.activeEvents,
     recentCaptures: room.recentCaptures
   };
 }
 
+function spawnRandomPowerUp(room: Room) {
+  const powerUpTypes: PowerUpType[] = [
+    'net_trap',
+    'speed_boost',
+    'titan_strength',
+    'secret_tunnel',
+    'dino_call',
+    'earth_fissure',
+    'stun_shockwave',
+    'tornado_gust'
+  ];
+  const type = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
+  const x = Math.random() * (MAP_BOUNDS.width - 300) + 150;
+  const y = Math.random() * (MAP_BOUNDS.height - 300) + 150;
+
+  const powerUp: ServerPowerUp = {
+    id: `pw_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    type,
+    x,
+    y,
+    spawnTime: Date.now(),
+    duration: 600 // 20 seconds on map if not collected
+  };
+
+  room.activePowerUps.push(powerUp);
+  broadcastRoom(room, {
+    type: 'POWERUP_SPAWNED',
+    powerUp
+  });
+}
+
 function startRoomGameLoop(room: Room) {
   if (room.tickInterval) clearInterval(room.tickInterval);
+
+  // Initialize Home Bases at 4 corners for competitive matches
+  room.homeBases = [
+    { slotNumber: 1, x: 130, y: 130, radius: 95, color: '#f97316', label: 'P1 CORRAL' },
+    { slotNumber: 2, x: 1270, y: 130, radius: 95, color: '#06b6d4', label: 'P2 CORRAL' },
+    { slotNumber: 3, x: 130, y: 770, radius: 95, color: '#10b981', label: 'P3 CORRAL' },
+    { slotNumber: 4, x: 1270, y: 770, radius: 95, color: '#ec4899', label: 'P4 CORRAL' }
+  ];
+
+  room.activePowerUps = [];
+  room.earthFissures = [];
+  room.secretTunnels = [];
+  room.tidalWaves = [];
 
   // Spawn initial dinosaurs (10 to 14 dinosaurs across the map)
   room.dinos = [];
@@ -246,10 +454,28 @@ function startRoomGameLoop(room: Room) {
     p.lassoState = 'ready';
     p.lassoLength = 0;
     p.lassoTargetDinoId = null;
+    p.tetheredDinoId = null;
+    p.tetheredPlayerId = null;
     p.speedMultiplier = 1.0;
     p.boostCooldown = 0;
     p.lureCount = 3;
     p.isStunned = false;
+    p.stunTimer = 0;
+    p.isNetTrapped = false;
+    p.netTrapTimer = 0;
+    p.heldPowerUp = null;
+    p.equippedGems = p.equippedGems || (slotIdx === 0 ? ['tidal_wave', 'net_trap'] : ['earth_fissure', 'stun_shockwave']);
+    p.gemCooldowns = { gem1: 0, gem2: 0, sprint: 0 };
+    p.gemMaxCooldowns = {
+      gem1: GEM_INFO_SERVER[p.equippedGems[0]]?.cooldownTicks || 450,
+      gem2: GEM_INFO_SERVER[p.equippedGems[1]]?.cooldownTicks || 450,
+      sprint: GEM_INFO_SERVER.speed_boost.cooldownTicks
+    };
+    p.activeBuffs = {
+      speedTimer: 0,
+      titanStrengthTimer: 0,
+      dinoCallTimer: 0
+    };
     slotIdx++;
   }
 
@@ -282,6 +508,78 @@ function startRoomGameLoop(room: Room) {
       }
     }
 
+    // Update Earth Fissures
+    for (let i = room.earthFissures.length - 1; i >= 0; i--) {
+      const ef = room.earthFissures[i];
+      ef.duration--;
+      if (ef.duration <= 0) {
+        room.earthFissures.splice(i, 1);
+      }
+    }
+
+    // Update Secret Tunnels
+    for (let i = room.secretTunnels.length - 1; i >= 0; i--) {
+      const st = room.secretTunnels[i];
+      st.duration--;
+      if (st.duration <= 0) {
+        room.secretTunnels.splice(i, 1);
+      }
+    }
+
+    // Update Tidal Waves (Single sweeping directional wave pushing all entities in path)
+    for (let i = room.tidalWaves.length - 1; i >= 0; i--) {
+      const w = room.tidalWaves[i];
+      w.x += w.vx;
+      w.y += w.vy;
+      w.life--;
+
+      const cosW = Math.cos(-w.angle);
+      const sinW = Math.sin(-w.angle);
+      const waveHalfLength = (w.length || 400) / 2; // 10 ô dài = 400px
+      const waveHalfWidth = (w.width || 120) / 2; // 3 ô ngang = 120px
+
+      // Push opponent players along wave flow
+      for (const p of Object.values(room.players)) {
+        if (p.id !== w.ownerId) {
+          const dx = p.x - w.x;
+          const dy = p.y - w.y;
+          const localX = dx * cosW - dy * sinW;
+          const localY = dx * sinW + dy * cosW;
+
+          if (Math.abs(localX) <= (waveHalfLength + 25) && Math.abs(localY) <= (waveHalfWidth + 25)) {
+            p.x += w.vx * 1.15;
+            p.y += w.vy * 1.15;
+            p.x = Math.max(40, Math.min(MAP_BOUNDS.width - 40, p.x));
+            p.y = Math.max(40, Math.min(MAP_BOUNDS.height - 40, p.y));
+            p.lassoState = 'ready';
+            p.lassoLength = 0;
+            p.isThrowingLasso = false;
+            p.tetheredDinoId = null;
+            p.tetheredPlayerId = null;
+          }
+        }
+      }
+
+      // Sweep all dinosaurs in tidal torrent path
+      for (const dino of room.dinos) {
+        const dx = dino.x - w.x;
+        const dy = dino.y - w.y;
+        const localX = dx * cosW - dy * sinW;
+        const localY = dx * sinW + dy * cosW;
+
+        if (Math.abs(localX) <= (waveHalfLength + dino.size) && Math.abs(localY) <= (waveHalfWidth + dino.size)) {
+          dino.x += w.vx * 1.15;
+          dino.y += w.vy * 1.15;
+          dino.x = Math.max(40, Math.min(MAP_BOUNDS.width - 40, dino.x));
+          dino.y = Math.max(40, Math.min(MAP_BOUNDS.height - 40, dino.y));
+        }
+      }
+
+      if (w.life <= 0) {
+        room.tidalWaves.splice(i, 1);
+      }
+    }
+
     // Update combo timer in Co-op
     if (room.comboTimer > 0) {
       room.comboTimer--;
@@ -307,20 +605,124 @@ function startRoomGameLoop(room: Room) {
 
     // Update Players
     for (const player of Object.values(room.players)) {
+      // Stun handling
       if (player.isStunned) {
         player.stunTimer--;
         if (player.stunTimer <= 0) player.isStunned = false;
-      } else {
-        const baseSpeed = 4.8 * player.speedMultiplier;
-        player.x += player.vx * baseSpeed;
-        player.y += player.vy * baseSpeed;
+      }
 
-        // Boundaries clamp
-        player.x = Math.max(40, Math.min(MAP_BOUNDS.width - 40, player.x));
-        player.y = Math.max(40, Math.min(MAP_BOUNDS.height - 40, player.y));
+      // Net trap handling
+      if (player.isNetTrapped) {
+        player.netTrapTimer--;
+        if (player.netTrapTimer <= 0) player.isNetTrapped = false;
+      }
+
+      // Active Buffs Tick
+      if (player.activeBuffs.speedTimer > 0) {
+        player.activeBuffs.speedTimer--;
+        player.speedMultiplier = 2.0;
+        if (player.activeBuffs.speedTimer <= 0) player.speedMultiplier = 1.0;
+      }
+
+      if (player.activeBuffs.titanStrengthTimer > 0) {
+        player.activeBuffs.titanStrengthTimer--;
+      }
+
+      if (player.activeBuffs.dinoCallTimer > 0) {
+        player.activeBuffs.dinoCallTimer--;
+      }
+
+      // Movement with Impassable Fissure Barrier resolution
+      if (!player.isStunned) {
+        const baseSpeed = 4.8 * player.speedMultiplier;
+        const targetX = Math.max(40, Math.min(MAP_BOUNDS.width - 40, player.x + player.vx * baseSpeed));
+        const targetY = Math.max(40, Math.min(MAP_BOUNDS.height - 40, player.y + player.vy * baseSpeed));
+        const pos = resolveFissureBarrier(player.x, player.y, targetX, targetY, 26, room.earthFissures);
+        player.x = pos.x;
+        player.y = pos.y;
+      }
+
+      // Cooldowns Tick for Player Gems
+      if (player.gemCooldowns) {
+        if (player.gemCooldowns.gem1 > 0) player.gemCooldowns.gem1--;
+        if (player.gemCooldowns.gem2 > 0) player.gemCooldowns.gem2--;
+        if (player.gemCooldowns.sprint > 0) player.gemCooldowns.sprint--;
       }
 
       if (player.boostCooldown > 0) player.boostCooldown--;
+
+      // Power-up Item Pickup Collision
+      if (!player.heldPowerUp) {
+        for (let i = room.activePowerUps.length - 1; i >= 0; i--) {
+          const pw = room.activePowerUps[i];
+          const dist = Math.hypot(player.x - pw.x, player.y - pw.y);
+          if (dist < 38) {
+            player.heldPowerUp = pw.type;
+            room.activePowerUps.splice(i, 1);
+            broadcastRoom(room, {
+              type: 'POWERUP_COLLECTED',
+              playerId: player.id,
+              powerUpType: pw.type
+            });
+            break;
+          }
+        }
+      }
+
+      // AI Bot skill usage & competitive dragging intelligence
+      if (player.inputSource === 'bot' && !player.isStunned && !player.isNetTrapped) {
+        if (player.heldPowerUp && Math.random() < 0.04) {
+          usePlayerPowerUp(room, player);
+        }
+
+        // Bot uses equipped gems if ready
+        if (player.gemCooldowns && Math.random() < 0.02) {
+          if (player.gemCooldowns.sprint === 0 && Math.random() < 0.3) {
+            usePlayerGemSlot(room, player, 'sprint');
+          } else if (player.gemCooldowns.gem1 === 0 && Math.random() < 0.5) {
+            usePlayerGemSlot(room, player, 1);
+          } else if (player.gemCooldowns.gem2 === 0 && Math.random() < 0.5) {
+            usePlayerGemSlot(room, player, 2);
+          }
+        }
+
+        const myHome = room.homeBases.find(hb => hb.slotNumber === player.slotNumber);
+
+        if (player.tetheredDinoId && myHome) {
+          // AI Bot drags tethered dinosaur to its home corral!
+          const angleToHome = Math.atan2(myHome.y - player.y, myHome.x - player.x);
+          player.vx = Math.cos(angleToHome);
+          player.vy = Math.sin(angleToHome);
+          player.angle = angleToHome;
+        } else if (room.dinos.length > 0 && player.lassoState === 'ready') {
+          // Find nearest available dinosaur or power-up
+          let nearestDino: ServerDino | null = null;
+          let nearestDist = 9999;
+          for (const d of room.dinos) {
+            if (d.state !== 'tethered' || player.activeBuffs.titanStrengthTimer > 0) {
+              const dist = Math.hypot(d.x - player.x, d.y - player.y);
+              if (dist < nearestDist) {
+                nearestDist = dist;
+                nearestDino = d;
+              }
+            }
+          }
+
+          if (nearestDino) {
+            const angle = Math.atan2(nearestDino.y - player.y, nearestDino.x - player.x);
+            player.vx = Math.cos(angle);
+            player.vy = Math.sin(angle);
+            player.angle = angle;
+
+            if (nearestDist < 150 && Math.random() < 0.1) {
+              player.lassoState = 'extending';
+              player.lassoAngle = angle;
+              player.lassoLength = 0;
+              player.isThrowingLasso = true;
+            }
+          }
+        }
+      }
 
       // Update Lasso Mechanics
       if (player.lassoState === 'extending') {
@@ -328,27 +730,145 @@ function startRoomGameLoop(room: Room) {
         player.lassoX = player.x + Math.cos(player.lassoAngle) * player.lassoLength;
         player.lassoY = player.y + Math.sin(player.lassoAngle) * player.lassoLength;
 
-        // Check collision with dinosaurs
-        let hitDino: ServerDino | null = null;
-        for (const dino of room.dinos) {
-          const dx = dino.x - player.lassoX;
-          const dy = dino.y - player.lassoY;
-          const dist = Math.hypot(dx, dy);
-          if (dist < dino.size + 15) {
-            hitDino = dino;
+        // Check if lasso path crosses any impassable Earth Fissure barrier
+        let lassoBlocked = false;
+        for (const fis of room.earthFissures) {
+          const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
+            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+          };
+          if (ccw(player.x, player.y, fis.x1, fis.y1, fis.x2, fis.y2) !== ccw(player.lassoX, player.lassoY, fis.x1, fis.y1, fis.x2, fis.y2) &&
+              ccw(player.x, player.y, player.lassoX, player.lassoY, fis.x1, fis.y1) !== ccw(player.x, player.y, player.lassoX, player.lassoY, fis.x2, fis.y2)) {
+            lassoBlocked = true;
             break;
           }
         }
 
-        if (hitDino) {
-          player.lassoState = 'hooked';
-          player.lassoTargetDinoId = hitDino.instanceId;
-          hitDino.state = 'being_captured';
-          if (!hitDino.capturingPlayerIds.includes(player.id)) {
-            hitDino.capturingPlayerIds.push(player.id);
-          }
-        } else if (player.lassoLength >= player.lassoMaxLength) {
+        if (lassoBlocked) {
           player.lassoState = 'returning';
+        } else {
+          // Check collision with dinosaurs
+          let hitDino: ServerDino | null = null;
+          for (const dino of room.dinos) {
+            const dx = dino.x - player.lassoX;
+            const dy = dino.y - player.lassoY;
+            const dist = Math.hypot(dx, dy);
+            if (dist < dino.size + 16) {
+              // If another player already tethered it, only Titan Strength can steal it
+              if (dino.state === 'tethered' && dino.tetheredByPlayerId !== player.id) {
+                if (player.activeBuffs.titanStrengthTimer > 0) {
+                  // Break previous owner's tether
+                  const prevOwner = room.players[dino.tetheredByPlayerId || ''];
+                  if (prevOwner) {
+                    prevOwner.tetheredDinoId = null;
+                    prevOwner.lassoState = 'ready';
+                  }
+                  hitDino = dino;
+                  break;
+                }
+              } else {
+                hitDino = dino;
+                break;
+              }
+            }
+          }
+
+          // Titan strength can also tether opponent players!
+          let hitPlayer: ServerPlayer | null = null;
+          if (player.activeBuffs.titanStrengthTimer > 0) {
+            for (const opp of Object.values(room.players)) {
+              if (opp.id !== player.id) {
+                const dist = Math.hypot(opp.x - player.lassoX, opp.y - player.lassoY);
+                if (dist < 32) {
+                  hitPlayer = opp;
+                  break;
+                }
+              }
+            }
+          }
+
+          if (hitPlayer) {
+            player.lassoState = 'tethering';
+            player.tetheredPlayerId = hitPlayer.id;
+            hitPlayer.isStunned = true;
+            hitPlayer.stunTimer = 90;
+          } else if (hitDino) {
+            if (room.mode === 'competitive') {
+              player.lassoState = 'tethering';
+              player.tetheredDinoId = hitDino.instanceId;
+              hitDino.state = 'tethered';
+              hitDino.tetheredByPlayerId = player.id;
+            } else {
+              player.lassoState = 'hooked';
+              player.lassoTargetDinoId = hitDino.instanceId;
+              hitDino.state = 'being_captured';
+              if (!hitDino.capturingPlayerIds.includes(player.id)) {
+                hitDino.capturingPlayerIds.push(player.id);
+              }
+            }
+          } else if (player.lassoLength >= player.lassoMaxLength) {
+            player.lassoState = 'returning';
+          }
+        }
+      } else if (player.lassoState === 'tethering') {
+        // Dragging tethered dinosaur (or player)
+        if (player.tetheredDinoId) {
+          const targetDino = room.dinos.find(d => d.instanceId === player.tetheredDinoId);
+          if (targetDino) {
+            player.lassoX = targetDino.x;
+            player.lassoY = targetDino.y;
+            player.lassoLength = Math.hypot(targetDino.x - player.x, targetDino.y - player.y);
+
+            // Drag physics: Dino follows player with tension
+            const pullAngle = Math.atan2(player.y - targetDino.y, player.x - targetDino.x);
+            const dist = Math.hypot(player.x - targetDino.x, player.y - targetDino.y);
+            const pullSpeed = dist > 70 ? 5.5 : 2.0;
+            const targetDinoX = targetDino.x + Math.cos(pullAngle) * pullSpeed;
+            const targetDinoY = targetDino.y + Math.sin(pullAngle) * pullSpeed;
+            const dinoPos = resolveFissureBarrier(targetDino.x, targetDino.y, targetDinoX, targetDinoY, targetDino.size, room.earthFissures);
+            targetDino.x = Math.max(30, Math.min(MAP_BOUNDS.width - 30, dinoPos.x));
+            targetDino.y = Math.max(30, Math.min(MAP_BOUNDS.height - 30, dinoPos.y));
+            targetDino.angle = pullAngle;
+
+            // Check if dinosaur reached player's Home Base Corral
+            const myHome = room.homeBases.find(hb => hb.slotNumber === player.slotNumber);
+            let capturedAtHome = false;
+
+            if (myHome) {
+              const distToHome = Math.hypot(targetDino.x - myHome.x, targetDino.y - myHome.y);
+              if (distToHome < myHome.radius) {
+                capturedAtHome = true;
+              }
+            }
+
+            // Check if dinosaur entered player's Secret Tunnel
+            const myTunnel = room.secretTunnels.find(st => st.ownerId === player.id);
+            if (myTunnel) {
+              const distToTunnel = Math.hypot(targetDino.x - myTunnel.x, targetDino.y - myTunnel.y);
+              if (distToTunnel < 48) {
+                capturedAtHome = true;
+              }
+            }
+
+            if (capturedAtHome) {
+              handleDinoCaptured(room, player, targetDino);
+            }
+          } else {
+            player.lassoState = 'returning';
+            player.tetheredDinoId = null;
+          }
+        } else if (player.tetheredPlayerId) {
+          const opp = room.players[player.tetheredPlayerId];
+          if (opp) {
+            const pullAngle = Math.atan2(player.y - opp.y, player.x - opp.x);
+            opp.x += Math.cos(pullAngle) * 5.0;
+            opp.y += Math.sin(pullAngle) * 5.0;
+            player.lassoX = opp.x;
+            player.lassoY = opp.y;
+            player.lassoLength = Math.hypot(opp.x - player.x, opp.y - player.y);
+          } else {
+            player.lassoState = 'returning';
+            player.tetheredPlayerId = null;
+          }
         }
       } else if (player.lassoState === 'hooked') {
         const targetDino = room.dinos.find(d => d.instanceId === player.lassoTargetDinoId);
@@ -360,12 +880,14 @@ function startRoomGameLoop(room: Room) {
           // Reel in
           const pullSpeed = 7.0;
           const pullAngle = Math.atan2(player.y - targetDino.y, player.x - targetDino.x);
-          targetDino.x += Math.cos(pullAngle) * pullSpeed;
-          targetDino.y += Math.sin(pullAngle) * pullSpeed;
+          const targetHookX = targetDino.x + Math.cos(pullAngle) * pullSpeed;
+          const targetHookY = targetDino.y + Math.sin(pullAngle) * pullSpeed;
+          const dinoPos = resolveFissureBarrier(targetDino.x, targetDino.y, targetHookX, targetHookY, targetDino.size, room.earthFissures);
+          targetDino.x = Math.max(30, Math.min(MAP_BOUNDS.width - 30, dinoPos.x));
+          targetDino.y = Math.max(30, Math.min(MAP_BOUNDS.height - 30, dinoPos.y));
 
           const distToPlayer = Math.hypot(player.x - targetDino.x, player.y - targetDino.y);
           if (distToPlayer < 45) {
-            // CAPTURE COMPLETED!
             handleDinoCaptured(room, player, targetDino);
           }
         } else {
@@ -379,6 +901,8 @@ function startRoomGameLoop(room: Room) {
           player.lassoState = 'ready';
           player.isThrowingLasso = false;
           player.lassoTargetDinoId = null;
+          player.tetheredDinoId = null;
+          player.tetheredPlayerId = null;
         } else {
           player.lassoX = player.x + Math.cos(player.lassoAngle) * player.lassoLength;
           player.lassoY = player.y + Math.sin(player.lassoAngle) * player.lassoLength;
@@ -391,6 +915,20 @@ function startRoomGameLoop(room: Room) {
       const dino = room.dinos[i];
       dino.animationTick += 0.2;
 
+      // If tethered, its movement is controlled by the player tether physics
+      if (dino.state === 'tethered') {
+        continue;
+      }
+
+      // Check Dino Call skill effect
+      let callingPlayer: ServerPlayer | null = null;
+      for (const p of Object.values(room.players)) {
+        if (p.activeBuffs.dinoCallTimer > 0) {
+          callingPlayer = p;
+          break;
+        }
+      }
+
       // Check nearby lures
       let attractedLure = null;
       for (const lure of room.lures) {
@@ -401,13 +939,18 @@ function startRoomGameLoop(room: Room) {
         }
       }
 
-      if (attractedLure) {
+      if (callingPlayer) {
+        // Attracted by Dino Call skill
+        const angle = Math.atan2(callingPlayer.y - dino.y, callingPlayer.x - dino.x);
+        dino.vx = Math.cos(angle) * (dino.speed * 1.2);
+        dino.vy = Math.sin(angle) * (dino.speed * 1.2);
+        dino.angle = angle;
+      } else if (attractedLure) {
         const angle = Math.atan2(attractedLure.y - dino.y, attractedLure.x - dino.x);
         dino.vx = Math.cos(angle) * (dino.speed * 0.8);
         dino.vy = Math.sin(angle) * (dino.speed * 0.8);
         dino.angle = angle;
       } else if (dino.state !== 'being_captured') {
-        // Find nearest player
         let nearestDist = 9999;
         let nearestPlayer: ServerPlayer | null = null;
         for (const p of Object.values(room.players)) {
@@ -421,7 +964,6 @@ function startRoomGameLoop(room: Room) {
         const def = DINOSAURS_SERVER.find(d => d.id === dino.defId);
         const isFast = def && (def.speedCategory === 'fast' || def.speedCategory === 'apex');
 
-        // Fast dinosaurs actively evade players!
         if (isFast && nearestDist < 160 && nearestPlayer) {
           dino.state = 'fleeing';
           const evadeAngle = Math.atan2(dino.y - nearestPlayer.y, dino.x - nearestPlayer.x);
@@ -442,10 +984,19 @@ function startRoomGameLoop(room: Room) {
         }
       }
 
-      dino.x += dino.vx;
-      dino.y += dino.vy;
+      const targetDinoX = dino.x + dino.vx;
+      const targetDinoY = dino.y + dino.vy;
+      const dinoPos = resolveFissureBarrier(dino.x, dino.y, targetDinoX, targetDinoY, dino.size, room.earthFissures);
+      if (dinoPos.x === dino.x && dinoPos.y === dino.y) {
+        dino.vx *= -1;
+        dino.vy *= -1;
+        dino.targetX = Math.random() * (MAP_BOUNDS.width - 200) + 100;
+        dino.targetY = Math.random() * (MAP_BOUNDS.height - 200) + 100;
+      } else {
+        dino.x = dinoPos.x;
+        dino.y = dinoPos.y;
+      }
 
-      // Keep within bounds
       if (dino.x < 30) { dino.x = 30; dino.vx *= -1; }
       if (dino.x > MAP_BOUNDS.width - 30) { dino.x = MAP_BOUNDS.width - 30; dino.vx *= -1; }
       if (dino.y < 30) { dino.y = 30; dino.vy *= -1; }
@@ -457,7 +1008,171 @@ function startRoomGameLoop(room: Room) {
       type: 'ROOM_STATE',
       state: getSanitizedRoomState(room)
     });
-  }, 1000 / 30); // 30 ticks per second
+  }, 1000 / 30);
+}
+
+function activateSkillEffect(room: Room, player: ServerPlayer, skillType: PowerUpType) {
+  const myHome = room.homeBases.find(hb => hb.slotNumber === player.slotNumber);
+
+  switch (skillType) {
+    case 'tidal_wave': {
+      const waveAngle = player.angle || 0;
+      // Spawns from behind character (kéo từ sau ra trước nhân vật)
+      const spawnBehindDist = 180;
+      const waveX = player.x - Math.cos(waveAngle) * spawnBehindDist;
+      const waveY = player.y - Math.sin(waveAngle) * spawnBehindDist;
+      const speed = 12;
+      const wave: ServerTidalWave = {
+        id: `wave_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        ownerId: player.id,
+        x: waveX,
+        y: waveY,
+        vx: Math.cos(waveAngle) * speed,
+        vy: Math.sin(waveAngle) * speed,
+        angle: waveAngle,
+        speed,
+        width: 120, // 3 ô ngang = 120px
+        length: 400, // 10 ô dài = 400px
+        life: 75,
+        maxLife: 75
+      };
+      room.tidalWaves.push(wave);
+      broadcastRoom(room, {
+        type: 'TIDAL_WAVE_SPAWNED',
+        wave
+      });
+      break;
+    }
+    case 'net_trap': {
+      // Net trap closest opponent(s)
+      Object.values(room.players).forEach(opp => {
+        if (opp.id !== player.id) {
+          const dist = Math.hypot(opp.x - player.x, opp.y - player.y);
+          if (dist < 450) {
+            opp.isNetTrapped = true;
+            opp.netTrapTimer = 150; // 5 seconds
+            opp.lassoState = 'ready';
+            opp.lassoLength = 0;
+            opp.isThrowingLasso = false;
+            opp.tetheredDinoId = null;
+          }
+        }
+      });
+      break;
+    }
+    case 'speed_boost': {
+      player.activeBuffs.speedTimer = 150; // 5s
+      player.speedMultiplier = 2.2;
+      break;
+    }
+    case 'titan_strength': {
+      player.activeBuffs.titanStrengthTimer = 150; // 5s
+      break;
+    }
+    case 'secret_tunnel': {
+      room.secretTunnels.push({
+        id: `tunnel_${Date.now()}`,
+        ownerId: player.id,
+        x: player.x,
+        y: player.y,
+        homeX: myHome ? myHome.x : 130,
+        homeY: myHome ? myHome.y : 130,
+        duration: 150 // 5s
+      });
+      break;
+    }
+    case 'dino_call': {
+      player.activeBuffs.dinoCallTimer = 150; // 5s
+      break;
+    }
+    case 'earth_fissure': {
+      const angle = player.angle || 0;
+      const perpAngle = angle + Math.PI / 2;
+      const halfLength = 280; // 14 ô = 560px tổng chiều dài vách ngăn
+      const cx = player.x + Math.cos(angle) * 45;
+      const cy = player.y + Math.sin(angle) * 45;
+      room.earthFissures.push({
+        id: `fissure_${Date.now()}`,
+        ownerId: player.id,
+        x1: Math.max(30, Math.min(MAP_BOUNDS.width - 30, cx - Math.cos(perpAngle) * halfLength)),
+        y1: Math.max(30, Math.min(MAP_BOUNDS.height - 30, cy - Math.sin(perpAngle) * halfLength)),
+        x2: Math.max(30, Math.min(MAP_BOUNDS.width - 30, cx + Math.cos(perpAngle) * halfLength)),
+        y2: Math.max(30, Math.min(MAP_BOUNDS.height - 30, cy + Math.sin(perpAngle) * halfLength)),
+        duration: 150 // 5s
+      });
+      break;
+    }
+    case 'stun_shockwave': {
+      Object.values(room.players).forEach(opp => {
+        if (opp.id !== player.id) {
+          const dist = Math.hypot(opp.x - player.x, opp.y - player.y);
+          if (dist < 400) {
+            opp.isStunned = true;
+            opp.stunTimer = 150; // 5s
+          }
+        }
+      });
+      break;
+    }
+    case 'tornado_gust': {
+      // Snaps all opponent ropes and pushes them back
+      Object.values(room.players).forEach(opp => {
+        if (opp.id !== player.id) {
+          opp.lassoState = 'ready';
+          opp.lassoLength = 0;
+          opp.isThrowingLasso = false;
+          opp.tetheredDinoId = null;
+        }
+      });
+      break;
+    }
+  }
+
+  broadcastRoom(room, {
+    type: 'SKILL_ACTIVATED',
+    playerId: player.id,
+    skillType,
+    x: player.x,
+    y: player.y
+  });
+}
+
+function usePlayerGemSlot(room: Room, player: ServerPlayer, gemSlot: 1 | 2 | 'sprint') {
+  if (player.isStunned || player.isNetTrapped) return;
+
+  if (gemSlot === 'sprint') {
+    if (player.gemCooldowns.sprint > 0) return;
+    activateSkillEffect(room, player, 'speed_boost');
+    player.gemCooldowns.sprint = GEM_INFO_SERVER.speed_boost.cooldownTicks;
+    player.gemMaxCooldowns.sprint = GEM_INFO_SERVER.speed_boost.cooldownTicks;
+    return;
+  }
+
+  const slotIdx = gemSlot === 1 ? 0 : 1;
+  const skillType = player.equippedGems?.[slotIdx] || (gemSlot === 1 ? 'net_trap' : 'tornado_gust');
+  const gemInfo = GEM_INFO_SERVER[skillType] || { cooldownTicks: 450, unlockScore: 0 };
+
+  const currentCd = gemSlot === 1 ? player.gemCooldowns.gem1 : player.gemCooldowns.gem2;
+  if (currentCd > 0) return;
+
+  if (player.score < gemInfo.unlockScore) return;
+
+  activateSkillEffect(room, player, skillType);
+
+  if (gemSlot === 1) {
+    player.gemCooldowns.gem1 = gemInfo.cooldownTicks;
+    player.gemMaxCooldowns.gem1 = gemInfo.cooldownTicks;
+  } else {
+    player.gemCooldowns.gem2 = gemInfo.cooldownTicks;
+    player.gemMaxCooldowns.gem2 = gemInfo.cooldownTicks;
+  }
+}
+
+function usePlayerPowerUp(room: Room, player: ServerPlayer) {
+  if (!player.heldPowerUp) return;
+  const powerUpType = player.heldPowerUp;
+  player.heldPowerUp = null;
+  activateSkillEffect(room, player, powerUpType);
 }
 
 function handleDinoCaptured(room: Room, player: ServerPlayer, dino: ServerDino) {
@@ -677,6 +1392,11 @@ async function startServer() {
               dinos: [],
               players: {},
               lures: [],
+              activePowerUps: [],
+              earthFissures: [],
+              secretTunnels: [],
+              tidalWaves: [],
+              homeBases: [],
               activeEvents: [],
               recentCaptures: []
             };
@@ -718,11 +1438,28 @@ async function startServer() {
             lassoAngle: 0,
             lassoState: 'ready',
             lassoTargetDinoId: null,
+            tetheredDinoId: null,
+            tetheredPlayerId: null,
             speedMultiplier: 1.0,
             boostCooldown: 0,
             lureCount: 3,
             isStunned: false,
             stunTimer: 0,
+            isNetTrapped: false,
+            netTrapTimer: 0,
+            heldPowerUp: null,
+            equippedGems: ['tidal_wave', 'net_trap'],
+            gemCooldowns: { gem1: 0, gem2: 0, sprint: 0 },
+            gemMaxCooldowns: {
+              gem1: GEM_INFO_SERVER.tidal_wave.cooldownTicks,
+              gem2: GEM_INFO_SERVER.net_trap.cooldownTicks,
+              sprint: GEM_INFO_SERVER.speed_boost.cooldownTicks
+            },
+            activeBuffs: {
+              speedTimer: 0,
+              titanStrengthTimer: 0,
+              dinoCallTimer: 0
+            },
             isReady: isHost,
             isHost,
             slotNumber,
@@ -742,7 +1479,16 @@ async function startServer() {
         const player = room.players[currentPlayerId];
         if (!player) return;
 
-        if (msg.type === 'SET_READY') {
+        if (msg.type === 'SELECT_GEMS') {
+          if (msg.slot1 && msg.slot2) {
+            player.equippedGems = [msg.slot1, msg.slot2];
+            player.gemMaxCooldowns.gem1 = GEM_INFO_SERVER[msg.slot1]?.cooldownTicks || 450;
+            player.gemMaxCooldowns.gem2 = GEM_INFO_SERVER[msg.slot2]?.cooldownTicks || 450;
+            broadcastRoom(room, { type: 'ROOM_STATE', state: getSanitizedRoomState(room) });
+          }
+        } else if (msg.type === 'USE_GEM' && room.status === 'playing') {
+          usePlayerGemSlot(room, player, msg.gemSlot);
+        } else if (msg.type === 'SET_READY') {
           player.isReady = !!msg.isReady;
           broadcastRoom(room, { type: 'ROOM_STATE', state: getSanitizedRoomState(room) });
         } else if (msg.type === 'UPDATE_ROOM_CONFIG' && player.isHost) {
@@ -778,11 +1524,28 @@ async function startServer() {
               lassoAngle: 0,
               lassoState: 'ready',
               lassoTargetDinoId: null,
+              tetheredDinoId: null,
+              tetheredPlayerId: null,
               speedMultiplier: 1.0,
               boostCooldown: 0,
               lureCount: 3,
               isStunned: false,
               stunTimer: 0,
+              isNetTrapped: false,
+              netTrapTimer: 0,
+              heldPowerUp: null,
+              equippedGems: botSlot === 2 ? ['earth_fissure', 'stun_shockwave'] : botSlot === 3 ? ['tornado_gust', 'dino_call'] : ['tidal_wave', 'net_trap'],
+              gemCooldowns: { gem1: 0, gem2: 0, sprint: 0 },
+              gemMaxCooldowns: {
+                gem1: 450,
+                gem2: 450,
+                sprint: 240
+              },
+              activeBuffs: {
+                speedTimer: 0,
+                titanStrengthTimer: 0,
+                dinoCallTimer: 0
+              },
               isReady: true,
               isHost: false,
               slotNumber: botSlot,
@@ -821,7 +1584,7 @@ async function startServer() {
             }, 1200);
           }
         } else if (msg.type === 'THROW_LASSO' && room.status === 'playing') {
-          if (player.lassoState === 'ready' && !player.isStunned) {
+          if (player.lassoState === 'ready' && !player.isStunned && !player.isNetTrapped) {
             player.lassoState = 'extending';
             player.lassoAngle = msg.angle !== undefined ? msg.angle : player.angle;
             player.lassoLength = 0;
@@ -829,6 +1592,8 @@ async function startServer() {
             player.lassoY = player.y;
             player.isThrowingLasso = true;
           }
+        } else if (msg.type === 'USE_POWERUP' && room.status === 'playing') {
+          usePlayerPowerUp(room, player);
         } else if (msg.type === 'DROP_LURE' && room.status === 'playing') {
           if (player.lureCount > 0) {
             player.lureCount--;

@@ -7,11 +7,15 @@ import {
   ActiveDinosaur,
   GameRoomState,
   AvatarOption,
+  PowerUpType,
+  EarthFissure,
+  TidalWave,
   WSClientMessage,
   WSServerMessage
 } from './types/game';
 import { DINOSAUR_CATALOG, MAP_CONFIGS } from './data/dinosaurs';
 import { AVATAR_OPTIONS, PLAYER_SLOT_COLORS } from './data/avatars';
+import { GEM_CATALOG } from './data/gems';
 import { audioEngine } from './audio/audioEngine';
 import { AvatarSelect } from './components/AvatarSelect';
 import { LobbyRoom } from './components/LobbyRoom';
@@ -32,6 +36,62 @@ import {
   Trophy
 } from 'lucide-react';
 
+/** Impassable Earth Fissure barrier collision resolver */
+function resolveFissureBarrier(
+  oldX: number,
+  oldY: number,
+  targetX: number,
+  targetY: number,
+  radius: number,
+  fissures: EarthFissure[]
+): { x: number; y: number } {
+  if (!fissures || fissures.length === 0) return { x: targetX, y: targetY };
+
+  let currX = targetX;
+  let currY = targetY;
+
+  for (const fis of fissures) {
+    const x1 = fis.x1;
+    const y1 = fis.y1;
+    const x2 = fis.x2;
+    const y2 = fis.y2;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lineLen2 = dx * dx + dy * dy;
+    if (lineLen2 === 0) continue;
+
+    // 1. Check if movement vector crosses the fissure line segment
+    const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
+      return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+    };
+    const crosses = ccw(oldX, oldY, x1, y1, x2, y2) !== ccw(currX, currY, x1, y1, x2, y2) &&
+                    ccw(oldX, oldY, currX, currY, x1, y1) !== ccw(oldX, oldY, currX, currY, x2, y2);
+    if (crosses) {
+      return { x: oldX, y: oldY };
+    }
+
+    // 2. Check distance from target position to the fissure segment
+    let t = ((currX - x1) * dx + (currY - y1) * dy) / lineLen2;
+    t = Math.max(0, Math.min(1, t));
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    const dist = Math.hypot(currX - projX, currY - projY);
+    const minRequiredDist = radius + 14; // Impassable wall thickness
+
+    if (dist < minRequiredDist) {
+      if (dist < 0.001) {
+        return { x: oldX, y: oldY };
+      }
+      const pushX = (currX - projX) / dist;
+      const pushY = (currY - projY) / dist;
+      currX = projX + pushX * minRequiredDist;
+      currY = projY + pushY * minRequiredDist;
+    }
+  }
+
+  return { x: currX, y: currY };
+}
+
 export default function App() {
   // Main Navigation / State - Start with Character & Nickname Selection screen!
   const [currentStatus, setCurrentStatus] = useState<GameStatus>('avatar_select');
@@ -49,6 +109,7 @@ export default function App() {
   const [myAvatar, setMyAvatar] = useState<AvatarOption>(AVATAR_OPTIONS[0]);
   const [myPlayerName, setMyPlayerName] = useState<string>('Leo');
   const [myColor, setMyColor] = useState<string>('#f97316');
+  const [equippedGems, setEquippedGems] = useState<[PowerUpType, PowerUpType]>(['tidal_wave', 'net_trap']);
 
   // Authoritative Room State (synced from WS or simulated locally)
   const [roomState, setRoomState] = useState<GameRoomState>({
@@ -139,10 +200,17 @@ export default function App() {
     };
   }, []);
 
-  // Initialize Local Players in state
+  // Initialize Local Players in state with powerups & gem loadouts
   const resetLocalPlayers = useCallback((count: number, currentAv: AvatarOption, curName: string, curCol: string) => {
     const newPlayers: Record<string, Player> = {};
     const slots = [1, 2, 3, 4] as const;
+
+    const defaultGemsForSlot: [PowerUpType, PowerUpType][] = [
+      ['tidal_wave', 'net_trap'],
+      ['earth_fissure', 'stun_shockwave'],
+      ['speed_boost', 'tornado_gust'],
+      ['titan_strength', 'dino_call']
+    ];
 
     for (let i = 0; i < count; i++) {
       const slot = slots[i];
@@ -150,6 +218,7 @@ export default function App() {
       const av = slot === 1 ? currentAv : AVATAR_OPTIONS[(i + 1) % AVATAR_OPTIONS.length];
       const col = slot === 1 ? curCol : PLAYER_SLOT_COLORS[slot].primary;
       const name = slot === 1 ? curName : `Ranger ${slot}`;
+      const pGems = slot === 1 ? equippedGems : defaultGemsForSlot[i % defaultGemsForSlot.length];
 
       newPlayers[pId] = {
         id: pId,
@@ -173,11 +242,24 @@ export default function App() {
         lassoAngle: 0,
         lassoState: 'ready',
         lassoTargetDinoId: null,
+        tetheredDinoId: null,
+        tetheredPlayerId: null,
         speedMultiplier: 1.0,
         boostCooldown: 0,
         lureCount: 3,
         isStunned: false,
         stunTimer: 0,
+        isNetTrapped: false,
+        netTrapTimer: 0,
+        heldPowerUp: null,
+        equippedGems: pGems,
+        gemCooldowns: { gem1: 0, gem2: 0, sprint: 0 },
+        gemMaxCooldowns: { gem1: 300, gem2: 300, sprint: 180 },
+        activeBuffs: {
+          speedTimer: 0,
+          titanStrengthTimer: 0,
+          dinoCallTimer: 0
+        },
         isReady: true,
         isHost: slot === 1,
         slotNumber: slot,
@@ -189,7 +271,252 @@ export default function App() {
       ...prev,
       players: newPlayers
     }));
+  }, [equippedGems]);
+
+  // Activate a gem skill effect locally (Shared between power-ups and gems)
+  const activateSkillEffect = (skillType: PowerUpType, p: Player, prev: GameRoomState) => {
+    audioEngine.playSkill(skillType);
+    const myHome = prev.homeBases?.find(hb => hb.slotNumber === p.slotNumber);
+
+    const nextEarthFissures = [...(prev.earthFissures || [])];
+    const nextSecretTunnels = [...(prev.secretTunnels || [])];
+    const nextTidalWaves = [...(prev.tidalWaves || [])];
+
+    switch (skillType) {
+      case 'tidal_wave': {
+        const angle = p.angle || 0;
+        const speed = 12;
+        // Spawns from behind the character (kéo từ sau ra trước nhân vật)
+        const spawnBehindDist = 180;
+        const waveX = p.x - Math.cos(angle) * spawnBehindDist;
+        const waveY = p.y - Math.sin(angle) * spawnBehindDist;
+        nextTidalWaves.push({
+          id: `wave_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          ownerId: p.id,
+          x: waveX,
+          y: waveY,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          angle,
+          speed,
+          width: 120, // 3 ô ngang = 120px
+          length: 400, // 10 ô dài = 400px
+          life: 75,
+          maxLife: 75
+        });
+        break;
+      }
+      case 'net_trap': {
+        (Object.values(prev.players) as Player[]).forEach(opp => {
+          if (opp.id !== p.id) {
+            const dist = Math.hypot(opp.x - p.x, opp.y - p.y);
+            if (dist < 450) {
+              opp.isNetTrapped = true;
+              opp.netTrapTimer = 150;
+              opp.lassoState = 'ready';
+              opp.lassoLength = 0;
+              opp.isThrowingLasso = false;
+              opp.tetheredDinoId = null;
+            }
+          }
+        });
+        break;
+      }
+      case 'speed_boost': {
+        p.activeBuffs = p.activeBuffs || { speedTimer: 0, titanStrengthTimer: 0, dinoCallTimer: 0 };
+        p.activeBuffs.speedTimer = 150;
+        p.speedMultiplier = 2.2;
+        break;
+      }
+      case 'titan_strength': {
+        p.activeBuffs = p.activeBuffs || { speedTimer: 0, titanStrengthTimer: 0, dinoCallTimer: 0 };
+        p.activeBuffs.titanStrengthTimer = 150;
+        break;
+      }
+      case 'secret_tunnel': {
+        nextSecretTunnels.push({
+          id: `local_tunnel_${Date.now()}`,
+          ownerId: p.id,
+          x: p.x,
+          y: p.y,
+          homeX: myHome ? myHome.x : 130,
+          homeY: myHome ? myHome.y : 130,
+          duration: 150
+        });
+        break;
+      }
+      case 'dino_call': {
+        p.activeBuffs = p.activeBuffs || { speedTimer: 0, titanStrengthTimer: 0, dinoCallTimer: 0 };
+        p.activeBuffs.dinoCallTimer = 150;
+        break;
+      }
+      case 'earth_fissure': {
+        const angle = p.angle || 0;
+        const perpAngle = angle + Math.PI / 2;
+        const halfLength = 280; // 14 ô = 560px tổng chiều dài vách ngăn
+        const cx = p.x + Math.cos(angle) * 45;
+        const cy = p.y + Math.sin(angle) * 45;
+        nextEarthFissures.push({
+          id: `local_fissure_${Date.now()}`,
+          ownerId: p.id,
+          x1: Math.max(30, Math.min(1370, cx - Math.cos(perpAngle) * halfLength)),
+          y1: Math.max(30, Math.min(870, cy - Math.sin(perpAngle) * halfLength)),
+          x2: Math.max(30, Math.min(1370, cx + Math.cos(perpAngle) * halfLength)),
+          y2: Math.max(30, Math.min(870, cy + Math.sin(perpAngle) * halfLength)),
+          duration: 150 // 5 giây (150 ticks)
+        });
+        break;
+      }
+      case 'stun_shockwave': {
+        (Object.values(prev.players) as Player[]).forEach(opp => {
+          if (opp.id !== p.id) {
+            const dist = Math.hypot(opp.x - p.x, opp.y - p.y);
+            if (dist < 400) {
+              opp.isStunned = true;
+              opp.stunTimer = 150;
+            }
+          }
+        });
+        break;
+      }
+      case 'tornado_gust': {
+        (Object.values(prev.players) as Player[]).forEach(opp => {
+          if (opp.id !== p.id) {
+            opp.lassoState = 'ready';
+            opp.lassoLength = 0;
+            opp.isThrowingLasso = false;
+            opp.tetheredDinoId = null;
+          }
+        });
+        break;
+      }
+    }
+
+    return {
+      ...prev,
+      earthFissures: nextEarthFissures,
+      secretTunnels: nextSecretTunnels,
+      tidalWaves: nextTidalWaves
+    };
+  };
+
+  // Use Power-up Skill locally
+  const usePowerUpLocally = useCallback((playerId: string) => {
+    setRoomState(prev => {
+      const p = prev.players[playerId];
+      if (!p || !p.heldPowerUp) return prev;
+      const skillType = p.heldPowerUp;
+      p.heldPowerUp = null;
+      return activateSkillEffect(skillType, p, prev);
+    });
   }, []);
+
+  // Use Gem Slot locally with cooldown & score unlock verification
+  const useGemLocally = useCallback((playerId: string, slotKey: 1 | 2 | 'sprint') => {
+    setRoomState(prev => {
+      const p = prev.players[playerId];
+      if (!p || p.isStunned || p.isNetTrapped) return prev;
+
+      p.gemCooldowns = p.gemCooldowns || { gem1: 0, gem2: 0, sprint: 0 };
+      p.gemMaxCooldowns = p.gemMaxCooldowns || { gem1: 300, gem2: 300, sprint: 180 };
+      p.equippedGems = p.equippedGems || ['tidal_wave', 'net_trap'];
+
+      if (slotKey === 'sprint') {
+        if (p.gemCooldowns.sprint > 0) return prev;
+        p.gemCooldowns.sprint = 180; // 6s cooldown
+        p.speedMultiplier = 1.8;
+        audioEngine.playBoost();
+        setTimeout(() => {
+          setRoomState(ps => {
+            const pl = ps.players[playerId];
+            if (pl) pl.speedMultiplier = 1.0;
+            return { ...ps };
+          });
+        }, 1500);
+        return { ...prev };
+      }
+
+      const gemType = slotKey === 1 ? p.equippedGems[0] : p.equippedGems[1];
+      const gemDef = GEM_CATALOG.find(g => g.id === gemType) || GEM_CATALOG[0];
+      const cdProp = slotKey === 1 ? 'gem1' : 'gem2';
+
+      // Verify Score requirement and Cooldown
+      if (p.score < gemDef.unlockScore) return prev;
+      if (p.gemCooldowns[cdProp] > 0) return prev;
+
+      const cdTicks = gemDef.cooldownSeconds * 30;
+      p.gemCooldowns[cdProp] = cdTicks;
+      p.gemMaxCooldowns[cdProp] = cdTicks;
+
+      return activateSkillEffect(gemType, p, prev);
+    });
+  }, []);
+
+  // Handle Gem Selection in Lobby or Customizer
+  const handleSelectGems = useCallback((slot1: PowerUpType, slot2: PowerUpType) => {
+    setEquippedGems([slot1, slot2]);
+    setRoomState(prev => {
+      const p = prev.players[myPlayerId.current];
+      if (p) {
+        p.equippedGems = [slot1, slot2];
+      }
+      return { ...prev };
+    });
+    if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'SELECT_GEMS', gems: [slot1, slot2] }));
+    }
+  }, [isOnlineMode]);
+
+  // Handle P1 Gem & Skill triggers
+  const handleP1UseGem1 = useCallback(() => {
+    if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'USE_GEM', gemSlot: 1 }));
+    } else {
+      useGemLocally(myPlayerId.current, 1);
+    }
+  }, [isOnlineMode, useGemLocally]);
+
+  const handleP1UseGem2 = useCallback(() => {
+    if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'USE_GEM', gemSlot: 2 }));
+    } else {
+      useGemLocally(myPlayerId.current, 2);
+    }
+  }, [isOnlineMode, useGemLocally]);
+
+  const handleP1UseSprint = useCallback(() => {
+    if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'USE_GEM', gemSlot: 'sprint' }));
+    } else {
+      useGemLocally(myPlayerId.current, 'sprint');
+    }
+  }, [isOnlineMode, useGemLocally]);
+
+  // Handle P2 Gem triggers
+  const handleP2UseGem1 = useCallback(() => {
+    useGemLocally('local_p2', 1);
+  }, [useGemLocally]);
+
+  const handleP2UseGem2 = useCallback(() => {
+    useGemLocally('local_p2', 2);
+  }, [useGemLocally]);
+
+  const handleP2UseSprint = useCallback(() => {
+    useGemLocally('local_p2', 'sprint');
+  }, [useGemLocally]);
+
+  // Handle Power-Up pickups
+  const handleP1UsePowerUp = useCallback(() => {
+    if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'USE_POWERUP' }));
+    } else {
+      usePowerUpLocally(myPlayerId.current);
+    }
+  }, [isOnlineMode, usePowerUpLocally]);
+
+  const handleP2UsePowerUp = useCallback(() => {
+    usePowerUpLocally('local_p2');
+  }, [usePowerUpLocally]);
 
   // Start Local Match Loop
   const startLocalMatch = useCallback(() => {
@@ -200,6 +527,33 @@ export default function App() {
     for (let i = 0; i < 12; i++) {
       initialDinos.push(spawnLocalDino());
     }
+
+    const homeBases = [
+      { slotNumber: 1 as const, x: 130, y: 130, radius: 95, color: '#f97316', label: 'P1 CORRAL' },
+      { slotNumber: 2 as const, x: 1270, y: 130, radius: 95, color: '#06b6d4', label: 'P2 CORRAL' },
+      { slotNumber: 3 as const, x: 130, y: 770, radius: 95, color: '#10b981', label: 'P3 CORRAL' },
+      { slotNumber: 4 as const, x: 1270, y: 770, radius: 95, color: '#ec4899', label: 'P4 CORRAL' }
+    ];
+
+    const powerUpTypes = ['net_trap', 'speed_boost', 'titan_strength', 'secret_tunnel', 'dino_call', 'earth_fissure', 'stun_shockwave', 'tornado_gust'] as const;
+    const initialPowerUps = [
+      {
+        id: `pw_1_${Date.now()}`,
+        type: powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)],
+        x: 450,
+        y: 450,
+        spawnTime: Date.now(),
+        duration: 600
+      },
+      {
+        id: `pw_2_${Date.now()}`,
+        type: powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)],
+        x: 950,
+        y: 450,
+        spawnTime: Date.now(),
+        duration: 600
+      }
+    ];
 
     setRoomState(prev => {
       const resetPlayers = { ...prev.players };
@@ -218,8 +572,16 @@ export default function App() {
         p.lassoState = 'ready';
         p.lassoLength = 0;
         p.lassoTargetDinoId = null;
+        p.tetheredDinoId = null;
+        p.tetheredPlayerId = null;
         p.isThrowingLasso = false;
         p.lureCount = 3;
+        p.heldPowerUp = null;
+        p.isStunned = false;
+        p.stunTimer = 0;
+        p.isNetTrapped = false;
+        p.netTrapTimer = 0;
+        p.activeBuffs = { speedTimer: 0, titanStrengthTimer: 0, dinoCallTimer: 0 };
         idx++;
       }
 
@@ -233,6 +595,10 @@ export default function App() {
         coopComboMultiplier: 1,
         comboTimer: 0,
         dinos: initialDinos,
+        homeBases,
+        activePowerUps: initialPowerUps,
+        earthFissures: [],
+        secretTunnels: [],
         lures: [],
         recentCaptures: []
       };
@@ -266,6 +632,74 @@ export default function App() {
           if (comboTime === 0) comboMul = 1;
         }
 
+        // Maintain Fissures & Tunnels
+        const fissures = [...(prev.earthFissures || [])];
+        for (let i = fissures.length - 1; i >= 0; i--) {
+          fissures[i].duration--;
+          if (fissures[i].duration <= 0) fissures.splice(i, 1);
+        }
+
+        const tunnels = [...(prev.secretTunnels || [])];
+        for (let i = tunnels.length - 1; i >= 0; i--) {
+          tunnels[i].duration--;
+          if (tunnels[i].duration <= 0) tunnels.splice(i, 1);
+        }
+
+        // Maintain Tidal Waves physics & directional push for everything in wave area
+        const tidalWaves = [...(prev.tidalWaves || [])];
+        for (let i = tidalWaves.length - 1; i >= 0; i--) {
+          const wave = tidalWaves[i];
+          wave.x += wave.vx;
+          wave.y += wave.vy;
+          wave.life--;
+
+          const cosW = Math.cos(-wave.angle);
+          const sinW = Math.sin(-wave.angle);
+          const waveHalfLength = (wave.length || 400) / 2; // 10 ô dài = 400px
+          const waveHalfWidth = (wave.width || 120) / 2; // 3 ô ngang = 120px
+
+          // Push opponent players within wave area
+          (Object.values(prev.players) as Player[]).forEach(p => {
+            if (p.id !== wave.ownerId) {
+              const dx = p.x - wave.x;
+              const dy = p.y - wave.y;
+              const localX = dx * cosW - dy * sinW;
+              const localY = dx * sinW + dy * cosW;
+
+              if (Math.abs(localX) <= (waveHalfLength + 25) && Math.abs(localY) <= (waveHalfWidth + 25)) {
+                p.x += wave.vx * 1.15;
+                p.y += wave.vy * 1.15;
+                p.x = Math.max(40, Math.min(1360, p.x));
+                p.y = Math.max(40, Math.min(860, p.y));
+                p.lassoState = 'ready';
+                p.lassoLength = 0;
+                p.isThrowingLasso = false;
+                p.tetheredDinoId = null;
+                p.tetheredPlayerId = null;
+              }
+            }
+          });
+
+          // Push dinosaurs within wave area
+          prev.dinos.forEach(d => {
+            const dx = d.x - wave.x;
+            const dy = d.y - wave.y;
+            const localX = dx * cosW - dy * sinW;
+            const localY = dx * sinW + dy * cosW;
+
+            if (Math.abs(localX) <= (waveHalfLength + d.size) && Math.abs(localY) <= (waveHalfWidth + d.size)) {
+              d.x += wave.vx * 1.15;
+              d.y += wave.vy * 1.15;
+              d.x = Math.max(30, Math.min(1370, d.x));
+              d.y = Math.max(30, Math.min(870, d.y));
+            }
+          });
+
+          if (wave.life <= 0) {
+            tidalWaves.splice(i, 1);
+          }
+        }
+
         // Maintain dinos
         const dinos = [...prev.dinos];
         if (dinos.length < 12 && Math.random() < 0.04) {
@@ -276,11 +710,68 @@ export default function App() {
         const captures = [...prev.recentCaptures];
         let teamScore = prev.coopTeamScore;
 
-        // Update Bot players logic
+        // Update players logic & dragging
         (Object.values(players) as Player[]).forEach(p => {
-          if (p.inputSource === 'bot' && !p.isStunned) {
-            // AI Bot wanders toward nearest dino
-            if (dinos.length > 0) {
+          // Decrement Gem Cooldowns
+          if (p.gemCooldowns) {
+            if (p.gemCooldowns.gem1 > 0) p.gemCooldowns.gem1--;
+            if (p.gemCooldowns.gem2 > 0) p.gemCooldowns.gem2--;
+            if (p.gemCooldowns.sprint > 0) p.gemCooldowns.sprint--;
+          }
+
+          // Stun & Net handling
+          if (p.isStunned) {
+            p.stunTimer--;
+            if (p.stunTimer <= 0) p.isStunned = false;
+          }
+          if (p.isNetTrapped) {
+            p.netTrapTimer--;
+            if (p.netTrapTimer <= 0) p.isNetTrapped = false;
+          }
+
+          if (p.activeBuffs?.speedTimer && p.activeBuffs.speedTimer > 0) {
+            p.activeBuffs.speedTimer--;
+            p.speedMultiplier = 2.0;
+            if (p.activeBuffs.speedTimer <= 0) p.speedMultiplier = 1.0;
+          }
+          if (p.activeBuffs?.titanStrengthTimer && p.activeBuffs.titanStrengthTimer > 0) {
+            p.activeBuffs.titanStrengthTimer--;
+          }
+          if (p.activeBuffs?.dinoCallTimer && p.activeBuffs.dinoCallTimer > 0) {
+            p.activeBuffs.dinoCallTimer--;
+          }
+
+          // AI Bot logic
+          if (p.inputSource === 'bot' && !p.isStunned && !p.isNetTrapped) {
+            if (p.heldPowerUp && Math.random() < 0.03) {
+              usePowerUpLocally(p.id);
+            }
+
+            // AI Gem Usage
+            p.gemCooldowns = p.gemCooldowns || { gem1: 0, gem2: 0, sprint: 0 };
+            p.equippedGems = p.equippedGems || ['tidal_wave', 'net_trap'];
+            const g1Def = GEM_CATALOG.find(g => g.id === p.equippedGems[0]) || GEM_CATALOG[0];
+            const g2Def = GEM_CATALOG.find(g => g.id === p.equippedGems[1]) || GEM_CATALOG[0];
+
+            if (p.score >= g1Def.unlockScore && p.gemCooldowns.gem1 === 0 && Math.random() < 0.02) {
+              p.gemCooldowns.gem1 = g1Def.cooldownSeconds * 30;
+              activateSkillEffect(p.equippedGems[0], p, prev);
+            } else if (p.score >= g2Def.unlockScore && p.gemCooldowns.gem2 === 0 && Math.random() < 0.02) {
+              p.gemCooldowns.gem2 = g2Def.cooldownSeconds * 30;
+              activateSkillEffect(p.equippedGems[1], p, prev);
+            } else if (p.gemCooldowns.sprint === 0 && Math.random() < 0.01) {
+              p.gemCooldowns.sprint = 180;
+              p.speedMultiplier = 1.8;
+            }
+
+            const myHome = prev.homeBases?.find(hb => hb.slotNumber === p.slotNumber);
+            if (p.tetheredDinoId && myHome) {
+              // Drag tethered dino to home corral!
+              const angleToHome = Math.atan2(myHome.y - p.y, myHome.x - p.x);
+              p.vx = Math.cos(angleToHome);
+              p.vy = Math.sin(angleToHome);
+              p.angle = angleToHome;
+            } else if (dinos.length > 0) {
               const target = dinos[0];
               const angle = Math.atan2(target.y - p.y, target.x - p.x);
               p.vx = Math.cos(angle);
@@ -296,38 +787,129 @@ export default function App() {
             }
           }
 
-          // Move player
-          const speed = 4.8 * p.speedMultiplier;
-          p.x += p.vx * speed;
-          p.y += p.vy * speed;
-          p.x = Math.max(40, Math.min(1360, p.x));
-          p.y = Math.max(40, Math.min(860, p.y));
+          // Move player with impassable fissure barrier resolution
+          if (!p.isStunned) {
+            const speed = 4.8 * p.speedMultiplier;
+            const targetX = Math.max(40, Math.min(1360, p.x + p.vx * speed));
+            const targetY = Math.max(40, Math.min(860, p.y + p.vy * speed));
+            const pos = resolveFissureBarrier(p.x, p.y, targetX, targetY, 26, fissures);
+            p.x = pos.x;
+            p.y = pos.y;
+          }
 
-          // Lasso Mechanics
+          // Lasso & Dragging Mechanics
           if (p.lassoState === 'extending') {
             p.lassoLength += 16;
             p.lassoX = p.x + Math.cos(p.lassoAngle) * p.lassoLength;
             p.lassoY = p.y + Math.sin(p.lassoAngle) * p.lassoLength;
 
-            // Check hit dino
-            let hitDino: ActiveDinosaur | null = null;
-            for (const d of dinos) {
-              const dist = Math.hypot(d.x - p.lassoX, d.y - p.lassoY);
-              if (dist < d.size + 15) {
-                hitDino = d;
+            // Check if lasso crosses any Earth Fissure impassable barrier
+            let lassoBlocked = false;
+            for (const fis of fissures) {
+              const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
+                return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+              };
+              if (ccw(p.x, p.y, fis.x1, fis.y1, fis.x2, fis.y2) !== ccw(p.lassoX, p.lassoY, fis.x1, fis.y1, fis.x2, fis.y2) &&
+                  ccw(p.x, p.y, p.lassoX, p.lassoY, fis.x1, fis.y1) !== ccw(p.x, p.y, p.lassoX, p.lassoY, fis.x2, fis.y2)) {
+                lassoBlocked = true;
                 break;
               }
             }
 
-            if (hitDino) {
-              p.lassoState = 'hooked';
-              p.lassoTargetDinoId = hitDino.instanceId;
-              hitDino.state = 'being_captured';
-              if (!hitDino.capturingPlayerIds.includes(p.id)) {
-                hitDino.capturingPlayerIds.push(p.id);
-              }
-            } else if (p.lassoLength >= p.lassoMaxLength) {
+            if (lassoBlocked) {
               p.lassoState = 'returning';
+            } else {
+              let hitDino: ActiveDinosaur | null = null;
+              for (const d of dinos) {
+                const dist = Math.hypot(d.x - p.lassoX, d.y - p.lassoY);
+                if (dist < d.size + 16) {
+                  hitDino = d;
+                  break;
+                }
+              }
+
+              if (hitDino) {
+                if (prev.mode === 'competitive') {
+                  p.lassoState = 'tethering';
+                  p.tetheredDinoId = hitDino.instanceId;
+                  hitDino.state = 'tethered';
+                  hitDino.tetheredByPlayerId = p.id;
+                } else {
+                  p.lassoState = 'hooked';
+                  p.lassoTargetDinoId = hitDino.instanceId;
+                  hitDino.state = 'being_captured';
+                  if (!hitDino.capturingPlayerIds.includes(p.id)) {
+                    hitDino.capturingPlayerIds.push(p.id);
+                  }
+                }
+              } else if (p.lassoLength >= p.lassoMaxLength) {
+                p.lassoState = 'returning';
+              }
+            }
+          } else if (p.lassoState === 'tethering') {
+            // Competitive dragging to home corral or secret tunnel
+            if (p.tetheredDinoId) {
+              const tetheredDino = dinos.find(d => d.instanceId === p.tetheredDinoId);
+              if (tetheredDino) {
+                p.lassoX = tetheredDino.x;
+                p.lassoY = tetheredDino.y;
+                p.lassoLength = Math.hypot(tetheredDino.x - p.x, tetheredDino.y - p.y);
+
+                const pullAngle = Math.atan2(p.y - tetheredDino.y, p.x - tetheredDino.x);
+                const dist = Math.hypot(p.x - tetheredDino.x, p.y - tetheredDino.y);
+                const pullSpeed = dist > 70 ? 5.5 : 2.0;
+                
+                const targetDinoX = tetheredDino.x + Math.cos(pullAngle) * pullSpeed;
+                const targetDinoY = tetheredDino.y + Math.sin(pullAngle) * pullSpeed;
+                const dinoPos = resolveFissureBarrier(tetheredDino.x, tetheredDino.y, targetDinoX, targetDinoY, tetheredDino.size, fissures);
+                tetheredDino.x = Math.max(30, Math.min(1370, dinoPos.x));
+                tetheredDino.y = Math.max(30, Math.min(870, dinoPos.y));
+                tetheredDino.angle = pullAngle;
+
+                const myHome = prev.homeBases?.find(hb => hb.slotNumber === p.slotNumber);
+                let capturedAtHome = false;
+                if (myHome && Math.hypot(tetheredDino.x - myHome.x, tetheredDino.y - myHome.y) < myHome.radius) {
+                  capturedAtHome = true;
+                }
+                const myTunnel = tunnels.find(t => t.ownerId === p.id);
+                if (myTunnel && Math.hypot(tetheredDino.x - myTunnel.x, tetheredDino.y - myTunnel.y) < 48) {
+                  capturedAtHome = true;
+                }
+
+                if (capturedAtHome) {
+                  const def = DINOSAUR_CATALOG.find(d => d.id === tetheredDino.defId);
+                  const isFast = def && (def.speedCategory === 'fast' || def.speedCategory === 'apex');
+                  const pts = tetheredDino.points;
+
+                  p.score += pts;
+                  p.capturedDinosCount++;
+                  if (isFast) p.fastDinosCount++;
+                  else p.slowDinosCount++;
+
+                  p.lassoState = 'ready';
+                  p.lassoLength = 0;
+                  p.isThrowingLasso = false;
+                  p.tetheredDinoId = null;
+
+                  audioEngine.playCaptureSuccess(!!isFast, pts);
+                  if (def) audioEngine.playRoar(def.roarType);
+
+                  const dIdx = dinos.findIndex(d => d.instanceId === tetheredDino.instanceId);
+                  if (dIdx !== -1) dinos.splice(dIdx, 1);
+
+                  captures.unshift({
+                    playerName: p.name,
+                    dinoName: def?.name || 'Dino',
+                    points: pts,
+                    timestamp: Date.now(),
+                    isFast: !!isFast
+                  });
+                  if (captures.length > 8) captures.pop();
+                }
+              } else {
+                p.lassoState = 'returning';
+                p.tetheredDinoId = null;
+              }
             }
           } else if (p.lassoState === 'hooked') {
             const hookedDino = dinos.find(d => d.instanceId === p.lassoTargetDinoId);
@@ -337,12 +919,14 @@ export default function App() {
               p.lassoLength = Math.hypot(hookedDino.x - p.x, hookedDino.y - p.y);
 
               const pullAngle = Math.atan2(p.y - hookedDino.y, p.x - hookedDino.x);
-              hookedDino.x += Math.cos(pullAngle) * 7.5;
-              hookedDino.y += Math.sin(pullAngle) * 7.5;
+              const targetHookX = hookedDino.x + Math.cos(pullAngle) * 7.5;
+              const targetHookY = hookedDino.y + Math.sin(pullAngle) * 7.5;
+              const dinoPos = resolveFissureBarrier(hookedDino.x, hookedDino.y, targetHookX, targetHookY, hookedDino.size, fissures);
+              hookedDino.x = Math.max(30, Math.min(1370, dinoPos.x));
+              hookedDino.y = Math.max(30, Math.min(870, dinoPos.y));
 
               const dist = Math.hypot(p.x - hookedDino.x, p.y - hookedDino.y);
               if (dist < 45) {
-                // CAPTURE!
                 const def = DINOSAUR_CATALOG.find(d => d.id === hookedDino.defId);
                 const isFast = def && (def.speedCategory === 'fast' || def.speedCategory === 'apex');
 
@@ -392,6 +976,8 @@ export default function App() {
               p.lassoState = 'ready';
               p.isThrowingLasso = false;
               p.lassoTargetDinoId = null;
+              p.tetheredDinoId = null;
+              p.tetheredPlayerId = null;
             } else {
               p.lassoX = p.x + Math.cos(p.lassoAngle) * p.lassoLength;
               p.lassoY = p.y + Math.sin(p.lassoAngle) * p.lassoLength;
@@ -399,10 +985,25 @@ export default function App() {
           }
         });
 
-        // Update dinos AI
+        // Update dinos AI with fissure obstacle avoidance
         dinos.forEach(d => {
           d.animationTick += 0.2;
-          if (d.state !== 'being_captured') {
+          if (d.state === 'tethered') return;
+
+          let callingPlayer: Player | null = null;
+          for (const p of Object.values(players) as Player[]) {
+            if (p.activeBuffs?.dinoCallTimer && p.activeBuffs.dinoCallTimer > 0) {
+              callingPlayer = p;
+              break;
+            }
+          }
+
+          if (callingPlayer) {
+            const angle = Math.atan2(callingPlayer.y - d.y, callingPlayer.x - d.x);
+            d.vx = Math.cos(angle) * (d.speed * 1.2);
+            d.vy = Math.sin(angle) * (d.speed * 1.2);
+            d.angle = angle;
+          } else if (d.state !== 'being_captured') {
             const dist = Math.hypot(d.targetX - d.x, d.targetY - d.y);
             if (dist < 30 || Math.random() < 0.015) {
               d.targetX = Math.random() * 1200 + 100;
@@ -413,8 +1014,21 @@ export default function App() {
             d.vy = Math.sin(angle) * d.speed;
             d.angle = angle;
           }
-          d.x += d.vx;
-          d.y += d.vy;
+          
+          const targetDinoX = d.x + d.vx;
+          const targetDinoY = d.y + d.vy;
+          const dinoPos = resolveFissureBarrier(d.x, d.y, targetDinoX, targetDinoY, d.size, fissures);
+          if (dinoPos.x === d.x && dinoPos.y === d.y) {
+            // Rebounded from fissure barrier
+            d.vx *= -1;
+            d.vy *= -1;
+            d.targetX = Math.random() * 1200 + 100;
+            d.targetY = Math.random() * 700 + 100;
+          } else {
+            d.x = dinoPos.x;
+            d.y = dinoPos.y;
+          }
+
           if (d.x < 30) { d.x = 30; d.vx *= -1; }
           if (d.x > 1370) { d.x = 1370; d.vx *= -1; }
           if (d.y < 30) { d.y = 30; d.vy *= -1; }
@@ -429,11 +1043,14 @@ export default function App() {
           comboTimer: comboTime,
           dinos,
           players,
+          activePowerUps: [],
+          earthFissures: fissures,
+          secretTunnels: tunnels,
           recentCaptures: captures
         };
       });
     }, 1000 / 30);
-  }, [spawnLocalDino, gameMode, selectedMap]);
+  }, [spawnLocalDino, gameMode, selectedMap, usePowerUpLocally]);
 
   // Initial check for URL query room parameter (e.g. https://your-app.onrender.com?room=TREX)
   useEffect(() => {
@@ -762,6 +1379,8 @@ export default function App() {
           currentPlayerName={myPlayerName}
           currentAvatar={myAvatar}
           currentColor={myColor}
+          equippedGems={equippedGems}
+          onSelectGems={handleSelectGems}
           onUpdateProfile={handleUpdateProfile}
           onSetGameMode={(mode) => {
             setGameMode(mode);
@@ -843,9 +1462,17 @@ export default function App() {
             onSendPlayerInput={handleP1Move}
             onThrowLasso={handleP1Lasso}
             onDropLure={handleP1Lure}
+            onUsePowerUp={handleP1UsePowerUp}
+            onUseGem1={handleP1UseGem1}
+            onUseGem2={handleP1UseGem2}
+            onUseSprint={handleP1UseSprint}
             onLocalP2Input={localPlayerCount >= 2 ? handleP2Move : undefined}
             onLocalP2Lasso={localPlayerCount >= 2 ? handleP2Lasso : undefined}
             onLocalP2Lure={localPlayerCount >= 2 ? handleP2Lure : undefined}
+            onLocalP2UsePowerUp={localPlayerCount >= 2 ? handleP2UsePowerUp : undefined}
+            onLocalP2UseGem1={localPlayerCount >= 2 ? handleP2UseGem1 : undefined}
+            onLocalP2UseGem2={localPlayerCount >= 2 ? handleP2UseGem2 : undefined}
+            onLocalP2UseSprint={localPlayerCount >= 2 ? handleP2UseSprint : undefined}
           />
 
           {/* In-Game HUD Overlay */}
@@ -904,10 +1531,28 @@ export default function App() {
             onP1Lasso={handleP1Lasso}
             onP1Boost={handleP1Boost}
             onP1Lure={handleP1Lure}
+            onP1UsePowerUp={handleP1UsePowerUp}
+            p1HeldPowerUp={roomState.players[myPlayerId.current]?.heldPowerUp}
+            onP1UseGem1={handleP1UseGem1}
+            onP1UseGem2={handleP1UseGem2}
+            onP1UseSprint={handleP1UseSprint}
+            p1EquippedGems={roomState.players[myPlayerId.current]?.equippedGems || equippedGems}
+            p1GemCooldowns={roomState.players[myPlayerId.current]?.gemCooldowns}
+            p1GemMaxCooldowns={roomState.players[myPlayerId.current]?.gemMaxCooldowns}
+            p1Score={roomState.players[myPlayerId.current]?.score || 0}
             onP2Move={localPlayerCount >= 2 ? handleP2Move : undefined}
             onP2Lasso={localPlayerCount >= 2 ? handleP2Lasso : undefined}
             onP2Boost={localPlayerCount >= 2 ? handleP2Boost : undefined}
             onP2Lure={localPlayerCount >= 2 ? handleP2Lure : undefined}
+            onP2UsePowerUp={localPlayerCount >= 2 ? handleP2UsePowerUp : undefined}
+            p2HeldPowerUp={roomState.players['local_p2']?.heldPowerUp}
+            onP2UseGem1={localPlayerCount >= 2 ? handleP2UseGem1 : undefined}
+            onP2UseGem2={localPlayerCount >= 2 ? handleP2UseGem2 : undefined}
+            onP2UseSprint={localPlayerCount >= 2 ? handleP2UseSprint : undefined}
+            p2EquippedGems={roomState.players['local_p2']?.equippedGems}
+            p2GemCooldowns={roomState.players['local_p2']?.gemCooldowns}
+            p2GemMaxCooldowns={roomState.players['local_p2']?.gemMaxCooldowns}
+            p2Score={roomState.players['local_p2']?.score || 0}
             isDualMode={localPlayerCount >= 2}
           />
         </div>

@@ -105,6 +105,21 @@ export const ScoreboardOverlay: React.FC<ScoreboardProps> = ({
                     </span>
                     <span className="text-yellow-200">⚡{player.fastDinosCount}</span>
                     <span className="text-green-200">🐢{player.slowDinosCount}</span>
+                    {player.heldPowerUp && (
+                      <span className="bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-full font-black animate-pulse">
+                        ⚡ {player.heldPowerUp.replace('_', ' ').toUpperCase()}
+                      </span>
+                    )}
+                    {player.activeBuffs && player.activeBuffs.titanStrengthTimer > 0 && (
+                      <span className="bg-red-500 text-white px-1.5 py-0.5 rounded-full animate-bounce">
+                        🔥 TITAN
+                      </span>
+                    )}
+                    {player.isNetTrapped && (
+                      <span className="bg-rose-600 text-white px-1.5 py-0.5 rounded-full">
+                        🕸️ TRAPPED
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -128,6 +143,14 @@ export const ScoreboardOverlay: React.FC<ScoreboardProps> = ({
               {formatTime(timeRemaining)}
             </span>
           </div>
+
+          {/* Competitive Home Base Goal Notice */}
+          {mode === 'competitive' && (
+            <div className="mt-2 flex items-center gap-1.5 rounded-2xl border-4 border-amber-500 bg-amber-400/95 px-4 py-1 text-slate-950 font-black text-xs uppercase shadow-xl animate-pulse">
+              <span>🏡</span>
+              <span>KÉO KHỦNG LONG VỀ CHUỒNG NHÀ CỦA BẠN ĐỂ GHI ĐIỂM!</span>
+            </div>
+          )}
 
           {/* Cooperative Team Score & Combo Bar */}
           {mode === 'cooperative' && (

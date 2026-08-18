@@ -73,6 +73,26 @@ class DinosaurSpeechEngine {
     const phrase = phrases[Math.floor(Math.random() * phrases.length)];
     this.speak(phrase, 0.95, 1.1);
   }
+
+  public speakDinoHome(dinoName: string, points: number) {
+    this.speak(`Secured in home corral! Plus ${points} points!`, 1.0, 1.15);
+  }
+
+  public speakSkill(skillType: string) {
+    const skillNames: Record<string, string> = {
+      tidal_wave: 'Tidal Torrent Wave!',
+      net_trap: 'Net Trap!',
+      speed_boost: 'Super Speed!',
+      titan_strength: 'Titan Strength!',
+      secret_tunnel: 'Secret Tunnel!',
+      dino_call: 'Dinosaur Call!',
+      earth_fissure: 'Earth Fissure!',
+      stun_shockwave: 'Stun Shockwave!',
+      tornado_gust: 'Tornado Gust!'
+    };
+    const announcement = skillNames[skillType] || 'Special Skill Activated!';
+    this.speak(announcement, 1.05, 1.2);
+  }
 }
 
 export const speechEngine = new DinosaurSpeechEngine();

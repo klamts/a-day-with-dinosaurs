@@ -425,6 +425,252 @@ class DinosaurAudioEngine {
     });
   }
 
+  // --- POWER-UP & SPECIAL COMPETITIVE SKILL SFX ---
+  public playPowerUpCollect() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const notes = [440, 554.37, 659.25, 880];
+    notes.forEach((f, i) => {
+      if (!this.ctx) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, t + i * 0.06);
+      gain.gain.setValueAtTime(this.sfxVolume * 0.4, t + i * 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.06 + 0.15);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t + i * 0.06);
+      osc.stop(t + i * 0.06 + 0.18);
+    });
+  }
+
+  public playNetTrap() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(600, t);
+    osc.frequency.exponentialRampToValueAtTime(120, t + 0.35);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.6, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.4);
+  }
+
+  public playSpeedBoost() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(200, t);
+    osc.frequency.exponentialRampToValueAtTime(950, t + 0.4);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.5, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.5);
+  }
+
+  public playTitanStrength() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(65, t);
+    osc.frequency.linearRampToValueAtTime(140, t + 0.2);
+    osc.frequency.exponentialRampToValueAtTime(45, t + 0.6);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.8, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.7);
+  }
+
+  public playSecretTunnelWarp() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(800, t);
+    osc.frequency.exponentialRampToValueAtTime(200, t + 0.25);
+    osc.frequency.exponentialRampToValueAtTime(1200, t + 0.5);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.6, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.6);
+  }
+
+  public playDinoCall() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(320, t);
+    osc.frequency.linearRampToValueAtTime(640, t + 0.3);
+    osc.frequency.linearRampToValueAtTime(480, t + 0.6);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.65, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.85);
+  }
+
+  public playEarthFissure() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(90, t);
+    osc.frequency.exponentialRampToValueAtTime(30, t + 0.5);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.7, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.6);
+  }
+
+  public playStunShockwave() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(250, t);
+    osc.frequency.exponentialRampToValueAtTime(80, t + 0.35);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.6, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.45);
+  }
+
+  public playTornadoGust() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.linearRampToValueAtTime(450, t + 0.2);
+    osc.frequency.linearRampToValueAtTime(180, t + 0.5);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.7, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.6);
+  }
+
+  public playTidalWave() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    // Layered white noise / ocean surf sweep
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(120, t);
+    osc.frequency.linearRampToValueAtTime(360, t + 0.35);
+    osc.frequency.exponentialRampToValueAtTime(90, t + 0.9);
+    gain.gain.setValueAtTime(this.sfxVolume * 0.8, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.95);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 1.0);
+  }
+
+  public playSkill(skillType: string) {
+    switch (skillType) {
+      case 'tidal_wave':
+        this.playTidalWave();
+        break;
+      case 'net_trap':
+        this.playNetTrap();
+        break;
+      case 'speed_boost':
+        this.playSpeedBoost();
+        break;
+      case 'titan_strength':
+        this.playTitanStrength();
+        break;
+      case 'secret_tunnel':
+        this.playSecretTunnelWarp();
+        break;
+      case 'dino_call':
+        this.playDinoCall();
+        break;
+      case 'earth_fissure':
+        this.playEarthFissure();
+        break;
+      case 'stun_shockwave':
+        this.playStunShockwave();
+        break;
+      case 'tornado_gust':
+        this.playTornadoGust();
+        break;
+      default:
+        this.playPowerUpCollect();
+        break;
+    }
+  }
+
+  public playDinoBankHome() {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5];
+    notes.forEach((f, i) => {
+      if (!this.ctx) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(f, t + i * 0.08);
+      gain.gain.setValueAtTime(this.sfxVolume * 0.55, t + i * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.25);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t + i * 0.08);
+      osc.stop(t + i * 0.08 + 0.3);
+    });
+  }
+
   // --- BACKGROUND PREHISTORIC RETRO SYNTH RHYTHM ---
   public startMusic() {
     if (this.isMusicPlaying || this.isMuted) return;

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { GameMode, MapType, Player } from '../types/game';
+import { GameMode, MapType, Player, PowerUpType } from '../types/game';
 import { AVATAR_OPTIONS, PLAYER_SLOT_COLORS } from '../data/avatars';
+import { GEM_CATALOG } from '../data/gems';
+import { GemSelectionPanel } from './GemSelectionPanel';
 import { audioEngine } from '../audio/audioEngine';
 import { speechEngine } from '../audio/speechEngine';
 import { RenderDeployModal } from './RenderDeployModal';
@@ -43,6 +45,8 @@ interface LobbyRoomProps {
   currentPlayerName?: string;
   currentAvatar?: AvatarOption;
   currentColor?: string;
+  equippedGems?: [PowerUpType, PowerUpType];
+  onSelectGems?: (slot1: PowerUpType, slot2: PowerUpType) => void;
   onUpdateProfile?: (avatar: AvatarOption, name: string, color: string) => void;
   onSetGameMode: (mode: GameMode) => void;
   onSetMap: (map: MapType) => void;
@@ -68,6 +72,8 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   currentPlayerName = 'Leo',
   currentAvatar = AVATAR_OPTIONS[0],
   currentColor = '#f97316',
+  equippedGems = ['tidal_wave', 'net_trap'],
+  onSelectGems,
   onUpdateProfile,
   onSetGameMode,
   onSetMap,
@@ -458,11 +464,22 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             </div>
           </div>
 
+          {/* 💎 KỸ NĂNG GEM TRƯỚC TRẬN ĐẤU (Gem Skills Selector) */}
+          <div className="relative z-10">
+            <GemSelectionPanel
+              equippedGems={equippedGems}
+              onSelectGems={onSelectGems}
+            />
+          </div>
+
           {/* Active Player Slots List */}
           <div className="relative z-10 flex-1 grid grid-cols-2 gap-3">
             {playerList.map((player) => {
               const avatar = AVATAR_OPTIONS.find(a => a.id === player.avatarId) || AVATAR_OPTIONS[0];
               const slotColor = PLAYER_SLOT_COLORS[player.slotNumber];
+              const pGems = player.equippedGems || equippedGems;
+              const g1Def = GEM_CATALOG.find(g => g.id === pGems[0]);
+              const g2Def = GEM_CATALOG.find(g => g.id === pGems[1]);
 
               return (
                 <div
@@ -483,7 +500,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                       {avatar.id === 'kai' && '⚡'}
                       {avatar.id === 'nyx' && '🌙'}
                     </div>
-                    <div className="overflow-hidden">
+                    <div className="overflow-hidden flex-1">
                       <div className="flex items-center gap-1">
                         <span className="font-black text-xs uppercase text-green-950 truncate">
                           {player.name}
@@ -496,6 +513,15 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                       </div>
                       <div className="text-[10px] font-bold text-green-800 truncate">
                         P{player.slotNumber} • {avatar.callsign}
+                      </div>
+                      {/* Equipped Gem preview */}
+                      <div className="flex items-center gap-1 mt-1">
+                        <span className="text-[9px] bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded font-black flex items-center gap-0.5">
+                          {g1Def?.emoji} {g1Def?.nameVi}
+                        </span>
+                        <span className="text-[9px] bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded font-black flex items-center gap-0.5">
+                          {g2Def?.emoji} {g2Def?.nameVi}
+                        </span>
                       </div>
                     </div>
                   </div>
