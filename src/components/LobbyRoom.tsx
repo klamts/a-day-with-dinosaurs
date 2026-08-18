@@ -30,6 +30,8 @@ import {
   GraduationCap
 } from 'lucide-react';
 
+import { AvatarOption } from '../types/game';
+
 interface LobbyRoomProps {
   roomId: string;
   isOnlineMode: boolean;
@@ -38,6 +40,10 @@ interface LobbyRoomProps {
   selectedMap: MapType;
   players: Record<string, Player>;
   localPlayerCount: number;
+  currentPlayerName?: string;
+  currentAvatar?: AvatarOption;
+  currentColor?: string;
+  onUpdateProfile?: (avatar: AvatarOption, name: string, color: string) => void;
   onSetGameMode: (mode: GameMode) => void;
   onSetMap: (map: MapType) => void;
   onSetLocalPlayerCount: (count: number) => void;
@@ -59,6 +65,10 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   selectedMap,
   players,
   localPlayerCount,
+  currentPlayerName = 'Leo',
+  currentAvatar = AVATAR_OPTIONS[0],
+  currentColor = '#f97316',
+  onUpdateProfile,
   onSetGameMode,
   onSetMap,
   onSetLocalPlayerCount,
@@ -75,6 +85,11 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [isRenderModalOpen, setIsRenderModalOpen] = useState(false);
   const [publicRooms, setPublicRooms] = useState<any[]>([]);
+  const [tempName, setTempName] = useState(currentPlayerName);
+
+  useEffect(() => {
+    setTempName(currentPlayerName);
+  }, [currentPlayerName]);
 
   const playerList = Object.values(players) as Player[];
 
@@ -367,13 +382,80 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
 
           {/* Center Stage Banner */}
           <div className="relative z-10 text-center my-1">
-            <div className="text-4xl mb-1">☄️ 🌋</div>
-            <h3 className="text-2xl md:text-3xl font-black text-green-950 uppercase italic tracking-tight drop-shadow">
+            <div className="text-3xl mb-0.5">☄️ 🌋</div>
+            <h3 className="text-xl md:text-2xl font-black text-green-950 uppercase italic tracking-tight drop-shadow">
               Dinosaurs Everywhere!
             </h3>
-            <p className="text-xs md:text-sm text-green-900 font-bold">
+            <p className="text-xs text-green-900 font-bold">
               Throw your lasso to catch fast dinosaurs before time runs out!
             </p>
+          </div>
+
+          {/* Quick Ranger Profile & Avatar Customizer Box */}
+          <div className="relative z-10 bg-white/95 rounded-2xl p-3 border-4 border-yellow-400 shadow-xl space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black uppercase text-green-950 flex items-center gap-1.5">
+                <span>👤 Nhân Vật & Tên Của Bạn (Your Hero):</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => onSwitchToAvatarSelect(1)}
+                className="text-[10px] font-black text-orange-600 hover:text-orange-700 bg-orange-100 hover:bg-orange-200 px-2 py-0.5 rounded-lg transition-all"
+              >
+                Chi Tiết Nhân Vật ✏️
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  maxLength={14}
+                  value={tempName}
+                  onChange={(e) => {
+                    setTempName(e.target.value);
+                    if (onUpdateProfile) {
+                      onUpdateProfile(currentAvatar, e.target.value, currentColor);
+                    }
+                  }}
+                  placeholder="Tên thợ săn..."
+                  className="w-36 bg-green-50 border-2 border-green-700 rounded-xl px-2.5 py-1 text-xs font-black text-green-950 focus:outline-none focus:border-yellow-500 shadow-inner"
+                />
+              </div>
+
+              {/* 6 One-Click Avatar Selectors */}
+              <div className="flex items-center gap-1.5 bg-green-100/80 p-1 rounded-xl border border-green-300">
+                {AVATAR_OPTIONS.map((av) => {
+                  const isSelected = av.id === currentAvatar.id;
+                  return (
+                    <button
+                      key={av.id}
+                      type="button"
+                      title={`${av.name} (${av.specialty})`}
+                      onClick={() => {
+                        audioEngine.playCaptureSuccess(false, 3);
+                        if (onUpdateProfile) {
+                          onUpdateProfile(av, tempName || av.name.split(' ')[0], av.primaryColor);
+                        }
+                      }}
+                      className={`h-8 w-8 rounded-full flex items-center justify-center text-base transition-all border-2 ${
+                        isSelected
+                          ? 'scale-115 border-yellow-500 shadow-lg ring-2 ring-yellow-400 rotate-6'
+                          : 'border-transparent opacity-75 hover:opacity-100 hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: av.primaryColor }}
+                    >
+                      {av.id === 'leo' && '🦁'}
+                      {av.id === 'maya' && '🦅'}
+                      {av.id === 'jax' && '🌋'}
+                      {av.id === 'zara' && '🌿'}
+                      {av.id === 'kai' && '⚡'}
+                      {av.id === 'nyx' && '🌙'}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* Active Player Slots List */}

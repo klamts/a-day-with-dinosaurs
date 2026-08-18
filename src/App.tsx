@@ -33,8 +33,8 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  // Main Navigation / State - Start in Lobby so user has full control of 1-4 players, modes, and maps!
-  const [currentStatus, setCurrentStatus] = useState<GameStatus>('lobby');
+  // Main Navigation / State - Start with Character & Nickname Selection screen!
+  const [currentStatus, setCurrentStatus] = useState<GameStatus>('avatar_select');
   const [isOnlineMode, setIsOnlineMode] = useState<boolean>(false);
   const [roomId, setRoomId] = useState<string>('DINO-LAN');
   const [gameMode, setGameMode] = useState<GameMode>('competitive');
@@ -500,17 +500,74 @@ export default function App() {
   }, [myAvatar.id, myColor, myPlayerName]);
 
   // Handle Avatar Complete
-  const handleAvatarSelectComplete = (avatar: AvatarOption, name: string, color: string, autoStart: boolean = false) => {
+  const handleAvatarSelectComplete = (
+    avatar: AvatarOption,
+    name: string,
+    color: string,
+    autoStart: boolean = false,
+    selectedOnline?: boolean
+  ) => {
     setMyAvatar(avatar);
     setMyPlayerName(name);
     setMyColor(color);
+
+    const onlineTarget = selectedOnline !== undefined ? selectedOnline : isOnlineMode;
+    if (selectedOnline !== undefined) {
+      setIsOnlineMode(selectedOnline);
+      if (selectedOnline) {
+        connectWebSocket(roomId);
+      }
+    }
+
     resetLocalPlayers(localPlayerCount, avatar, name, color);
+
+    if (onlineTarget && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'UPDATE_PLAYER',
+          name,
+          avatarId: avatar.id,
+          color
+        })
+      );
+    }
+
     if (autoStart) {
-      startLocalMatch();
+      if (onlineTarget && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'START_GAME',
+            mode: gameMode,
+            map: selectedMap,
+            duration: 90
+          })
+        );
+        setCurrentStatus('playing');
+        audioEngine.startMusic();
+      } else {
+        startLocalMatch();
+      }
     } else {
       setCurrentStatus('lobby');
     }
   };
+
+  const handleUpdateProfile = useCallback((avatar: AvatarOption, name: string, color: string) => {
+    setMyAvatar(avatar);
+    setMyPlayerName(name);
+    setMyColor(color);
+    resetLocalPlayers(localPlayerCount, avatar, name, color);
+    if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'UPDATE_PLAYER',
+          name,
+          avatarId: avatar.id,
+          color
+        })
+      );
+    }
+  }, [isOnlineMode, localPlayerCount, resetLocalPlayers]);
 
   // Local Player 1 Actions
   const handleP1Move = useCallback((vx: number, vy: number, angle: number, isBoosting: boolean = false) => {
@@ -702,6 +759,10 @@ export default function App() {
           selectedMap={selectedMap}
           players={roomState.players}
           localPlayerCount={localPlayerCount}
+          currentPlayerName={myPlayerName}
+          currentAvatar={myAvatar}
+          currentColor={myColor}
+          onUpdateProfile={handleUpdateProfile}
           onSetGameMode={(mode) => {
             setGameMode(mode);
             if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -743,8 +804,14 @@ export default function App() {
           }}
           onToggleReady={() => {}}
           onStartGame={() => {
-            if (isOnlineMode && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'START_GAME', mode: gameMode, map: selectedMap, duration: 90 }));
+            if (isOnlineMode) {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'START_GAME', mode: gameMode, map: selectedMap, duration: 90 }));
+                setCurrentStatus('playing');
+                audioEngine.startMusic();
+              } else {
+                startLocalMatch();
+              }
             } else {
               startLocalMatch();
             }

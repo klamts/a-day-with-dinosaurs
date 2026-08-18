@@ -260,6 +260,12 @@ function startRoomGameLoop(room: Room) {
   room.comboTimer = 0;
   room.recentCaptures = [];
 
+  // Broadcast immediate status transition so all clients leave lobby immediately
+  broadcastRoom(room, {
+    type: 'ROOM_STATE',
+    state: getSanitizedRoomState(room)
+  });
+
   let tickCounter = 0;
 
   room.tickInterval = setInterval(() => {
@@ -789,7 +795,8 @@ async function startServer() {
             delete room.players[msg.botId];
             broadcastRoom(room, { type: 'ROOM_STATE', state: getSanitizedRoomState(room) });
           }
-        } else if (msg.type === 'START_GAME' && player.isHost) {
+        } else if (msg.type === 'START_GAME') {
+          // In online room, start game smoothly
           if (msg.mode) room.mode = msg.mode;
           if (msg.map) room.map = msg.map;
           if (msg.duration) {
@@ -797,6 +804,11 @@ async function startServer() {
             room.timeRemaining = msg.duration;
           }
           startRoomGameLoop(room);
+        } else if (msg.type === 'UPDATE_PLAYER') {
+          if (msg.name) player.name = msg.name.trim().substring(0, 18);
+          if (msg.avatarId) player.avatarId = msg.avatarId;
+          if (msg.color) player.color = msg.color;
+          broadcastRoom(room, { type: 'ROOM_STATE', state: getSanitizedRoomState(room) });
         } else if (msg.type === 'PLAYER_INPUT' && room.status === 'playing') {
           player.vx = msg.vx || 0;
           player.vy = msg.vy || 0;
