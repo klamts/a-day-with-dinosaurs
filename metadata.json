@@ -1,0 +1,6 @@
+{
+  "name": "A Day with Dinosaurs",
+  "description": "Prehistoric dinosaur collecting game with avatar selection, competitive and cooperative modes, fast/slow dinosaur scoring, authentic noise synthesizer, dual on-screen controllers, and real-time LAN 4-player support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
