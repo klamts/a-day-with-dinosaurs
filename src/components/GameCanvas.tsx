@@ -146,10 +146,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       // --- PLAYER 1 (WASD) ---
       let p1vx = 0;
       let p1vy = 0;
-      if (keys['KeyW'] || keys['ArrowUp']) p1vy -= 1;
-      if (keys['KeyS'] || keys['ArrowDown']) p1vy += 1;
-      if (keys['KeyA'] || keys['ArrowLeft']) p1vx -= 1;
-      if (keys['KeyD'] || keys['ArrowRight']) p1vx += 1;
+      if (keys['KeyW'] ) p1vy -= 1;
+      if (keys['KeyS'] ) p1vy += 1;
+      if (keys['KeyA'] ) p1vx -= 1;
+      if (keys['KeyD'] ) p1vx += 1;
 
       if (p1vx !== 0 || p1vy !== 0) {
         const len = Math.hypot(p1vx, p1vy);
@@ -165,10 +165,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       if (onLocalP2Input) {
         let p2vx = 0;
         let p2vy = 0;
-        if (keys['ArrowUp'] || keys['KeyI']) p2vy -= 1;
-        if (keys['ArrowDown'] || keys['KeyK']) p2vy += 1;
-        if (keys['ArrowLeft'] || keys['KeyJ']) p2vx -= 1;
-        if (keys['ArrowRight'] || keys['KeyL']) p2vx += 1;
+        if (keys['ArrowUp'] ) p2vy -= 1;
+        if (keys['ArrowDown'] ) p2vy += 1;
+        if (keys['ArrowLeft'] ) p2vx -= 1;
+        if (keys['ArrowRight'] ) p2vx += 1;
 
         if (p2vx !== 0 || p2vy !== 0) {
           const len = Math.hypot(p2vx, p2vy);
